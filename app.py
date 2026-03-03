@@ -8,7 +8,7 @@ import copy
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Practical 3D Frame Analyzer & Designer", layout="wide")
 st.title("🏗️ 3D Frame Analysis & Complete Building Design")
-st.caption("Includes: Grouped Member Design | Slab Check | Isolated Footing Sizing based on SBC")
+st.caption("Includes: Grouped Member Design | Rebar Detailing | Footing Sizing based on SBC")
 
 # --- INITIALIZE STATE ---
 if 'grids' not in st.session_state:
@@ -79,6 +79,29 @@ for _, r in floors_df.iterrows():
     curr_z += float(r['Height (m)'])
     z_elevs[int(r['Floor'])] = curr_z
 
+# --- REBAR DETAILING ALGORITHM ---
+def get_rebar_detail(ast_req, member_type="Beam"):
+    if ast_req <= 0: return "Nominal"
+    areas = {10: 78.5, 12: 113.1, 16: 201.0, 20: 314.1, 25: 490.8, 32: 804.2}
+    
+    if member_type == "Beam":
+        # Common beam layer configurations
+        configs = [(2, 12), (3, 12), (2, 16), (4, 12), (3, 16), (2, 20), (4, 16), 
+                   (3, 20), (5, 16), (4, 20), (3, 25), (5, 20), (4, 25), (6, 20), 
+                   (5, 25), (6, 25), (8, 25)]
+    else: 
+        # Column configurations (Requires minimum 4 bars, symmetric preferred)
+        configs = [(4, 12), (6, 12), (4, 16), (8, 12), (6, 16), (4, 20), (8, 16), 
+                   (6, 20), (10, 16), (4, 25), (8, 20), (12, 16), (6, 25), (10, 20), 
+                   (8, 25), (12, 20), (10, 25), (12, 25), (16, 25), (20, 25)]
+                   
+    for count, dia in sorted(configs, key=lambda x: x[0]*areas[x[1]]):
+        prov_ast = count * areas[dia]
+        if prov_ast >= ast_req:
+            return f"{count}-T{dia} (Prv: {int(prov_ast)})"
+            
+    return "Custom (High Ast)"
+
 # --- IS 456 DESIGN FUNCTIONS ---
 def design_beam_is456(b_m, h_m, Mu_kNm, Vu_kN, fck, fy):
     b, h = max(b_m * 1000, 1.0), max(h_m * 1000, 1.0)
@@ -101,7 +124,9 @@ def design_beam_is456(b_m, h_m, Mu_kNm, Vu_kN, fck, fy):
     Ast_req = max(Ast_req, 0.85 * b * d / max(fy, 1.0))
     tau_v = (Vu_kN * 1000) / (b * d)
     if tau_v > 0.62 * math.sqrt(fck): status += " | Shear Fail"
-    return round(Ast_req, 1), status
+    
+    rebar_str = get_rebar_detail(Ast_req, "Beam")
+    return round(Ast_req, 1), rebar_str, status
 
 def design_column_is456(b_m, h_m, Pu_kN, Mu_kNm, fck, fy):
     b, h = max(b_m * 1000, 1.0), max(h_m * 1000, 1.0)
@@ -115,7 +140,9 @@ def design_column_is456(b_m, h_m, Pu_kN, Mu_kNm, fck, fy):
     status = "Safe"
     if Asc_req > 0.040 * Ag: status = "Over-Reinf (>4%)"
     if Pu > (0.45 * fck * Ag + 0.75 * fy * (0.04 * Ag)): status = "Crushing Fail"
-    return round(Asc_req, 1), status
+    
+    rebar_str = get_rebar_detail(Asc_req, "Column")
+    return round(Asc_req, 1), rebar_str, status
 
 # --- ENGINE: BUILD MESH ---
 def build_mesh():
@@ -129,7 +156,7 @@ def build_mesh():
         if xg in x_map and yg in y_map:
             primary_xy.append({'x': x_map[xg] + float(r.get('X_Offset (m)', 0.0)), 'y': y_map[yg] + float(r.get('Y_Offset (m)', 0.0)), 'angle': float(r.get('Angle (deg)', 0.0))})
             
-    nid, eid = 0, 1 # CRITICAL FIX: Matrix indexing requires nodes to start at 0
+    nid, eid = 0, 1 
     for f in range(len(floors_df) + 1):
         for pt in primary_xy:
             nodes.append({'id': nid, 'x': pt['x'], 'y': pt['y'], 'z': z_elevs.get(f, 0.0), 'floor': f, 'angle': pt['angle'], 'is_dummy': False})
@@ -277,8 +304,8 @@ def transform_matrix(ni, nj, angle_deg):
 
 st.divider()
 
-if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="stretch"):
-    with st.spinner("Processing Matrix, Extracting Forces & Sizing Members..."):
+if st.button("🚀 Execute Analysis & Extract Design Detailing", type="primary", width="stretch"):
+    with st.spinner("Processing Matrix, Extracting Forces & Detailing Rebar..."):
         ndof = len(nodes) * 6
         K_global = np.zeros((ndof, ndof))
         F_global = np.zeros(ndof)
@@ -379,21 +406,21 @@ if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="st
 
             b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
             if el['type'] == 'Beam':
-                req_ast, stat = design_beam_is456(b_m, h_m, moment_max, shear, fck, fy)
+                req_ast, rebar, stat = design_beam_is456(b_m, h_m, moment_max, shear, fck, fy)
             else:
-                req_ast, stat = design_column_is456(b_m, h_m, axial, moment_max, fck, fy)
+                req_ast, rebar, stat = design_column_is456(b_m, h_m, axial, moment_max, fck, fy)
                 
             design_data.append({
                 "Member ID": f"M{el['id']}", "Type": el['type'], "Floor": el['ni_n']['floor'],
                 "Size (mm)": el['size'], "Max Pu (kN)": round(axial, 1), "Max Mu (kN.m)": round(moment_max, 1),
-                "Req Steel (mm²)": req_ast, "Status": stat
+                "Req Ast (mm²)": req_ast, "Provided Rebar": rebar, "Status": stat
             })
 
         df_analysis = pd.DataFrame(analysis_data)
         df_design = pd.DataFrame(design_data)
         
         # --- TABULAR PRESENTATION ---
-        tab1, tab2, tab3 = st.tabs(["📊 Analysis (Raw Forces)", "📐 Grouped Member Design", "🟦 Slab & Footing Design"])
+        tab1, tab2, tab3 = st.tabs(["📊 Raw Internal Forces", "📐 Main Reinforcement Design", "🟦 Slabs & Footings"])
         
         with tab1:
             st.markdown("### Individual Member Internal Forces")
@@ -401,26 +428,28 @@ if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="st
             
         with tab2:
             st.markdown("### IS 456 Grouped Design Envelopes")
-            st.info("Members are grouped by Floor and Cross-Section to find the critical maximum forces for practical reinforcement detailing.")
+            st.info("Members are grouped by Floor and Section Size to find the critical force envelope for detailing.")
             
             df_col = df_design[df_design['Type'] == 'Column']
             if not df_col.empty:
                 col_group = df_col.groupby(['Floor', 'Size (mm)']).agg(
-                    Max_Pu=('Max Pu (kN)', 'max'), Max_Mu=('Max Mu (kN.m)', 'max'), Max_Ast=('Req Steel (mm²)', 'max')
+                    Max_Pu=('Max Pu (kN)', 'max'), Max_Mu=('Max Mu (kN.m)', 'max'), Max_Ast=('Req Ast (mm²)', 'max')
                 ).reset_index()
+                col_group['Detailing'] = col_group['Max_Ast'].apply(lambda ast: get_rebar_detail(ast, "Column"))
                 st.subheader("Column Groups")
                 st.dataframe(col_group, width="stretch")
                 
             df_beam = df_design[df_design['Type'] == 'Beam']
             if not df_beam.empty:
                 beam_group = df_beam.groupby(['Floor', 'Size (mm)']).agg(
-                    Max_Mu=('Max Mu (kN.m)', 'max'), Max_Ast=('Req Steel (mm²)', 'max')
+                    Max_Mu=('Max Mu (kN.m)', 'max'), Max_Ast=('Req Ast (mm²)', 'max')
                 ).reset_index()
+                beam_group['Detailing'] = beam_group['Max_Ast'].apply(lambda ast: get_rebar_detail(ast, "Beam"))
                 st.subheader("Beam Groups")
                 st.dataframe(beam_group, width="stretch")
                 
         with tab3:
-            st.markdown("### IS 456 Two-Way Slab Check (Critical Panel)")
+            st.markdown("### IS 456 Two-Way Slab Spacing Check")
             x_spans = [x_coords_sorted[i+1] - x_coords_sorted[i] for i in range(len(x_coords_sorted)-1) if (x_coords_sorted[i+1] - x_coords_sorted[i]) > 0.1]
             y_spans = [y_coords_sorted[i+1] - y_coords_sorted[i] for i in range(len(y_coords_sorted)-1) if (y_coords_sorted[i+1] - y_coords_sorted[i]) > 0.1]
             Lx = max(min(x_spans) if x_spans else 1.0, 0.001)
@@ -431,6 +460,14 @@ if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="st
             
             w_u_slab = 1.5 * (live_load + floor_finish + (slab_thick/1000.0)*25.0)
             Mu_slab = alpha_x * w_u_slab * (Lx**2)
+            d_eff_slab = max(slab_thick - 25, 1.0)
+            
+            sqrt_term = max(1 - (4.6 * Mu_slab * 1e6) / (max(fck, 1.0) * 1000 * d_eff_slab**2), 0)
+            Ast_req_slab = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(sqrt_term)) * 1000 * d_eff_slab
+            Ast_min_slab = 0.0012 * 1000 * slab_thick
+            Ast_slab = max(Ast_req_slab, Ast_min_slab)
+            
+            slab_spacing = min(math.floor(1000 / (Ast_slab / 78.5) / 10)*10, 300) # Using T10 bars (Area = 78.5)
             d_req_flex = math.sqrt((Mu_slab * 1e6) / ((0.133 if fy>=500 else 0.138) * max(fck, 1.0) * 1000))
             d_req_def = (Lx * 1000) / 28.0 
             
@@ -438,11 +475,14 @@ if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="st
             
             st.write(f"- **Critical Panel:** {round(Lx,2)}m x {round(Ly,2)}m ({'Two-Way' if ratio <= 2.0 else 'One-Way'})")
             st.write(f"- **Max Factored Moment:** {round(Mu_slab, 2)} kN.m")
-            st.write(f"- **Required Depth:** {round(max(d_req_flex, d_req_def), 1)} mm | **Provided:** {slab_thick - 25} mm")
-            if safe_slab: st.success("✅ Slab Thickness is Safe")
-            else: st.error("❌ Slab Thickness Fails Deflection/Flexure. Increase Thickness.")
+            st.write(f"- **Required Thickness:** {round(max(d_req_flex, d_req_def)+25, 1)} mm | **Provided:** {slab_thick} mm")
             
-            st.markdown("### Isolated Pad Footings (Based on SBC)")
+            if safe_slab: 
+                st.success(f"✅ Slab is Safe. **Main Reinforcement (Bottom): T10 @ {int(slab_spacing)} mm c/c**")
+            else: 
+                st.error("❌ Slab Thickness Fails Deflection/Flexure limits. Increase Thickness.")
+            
+            st.markdown("### Isolated Pad Footings Detail (Based on SBC)")
             st.info(f"Using Unfactored Service Loads (Pu / 1.5) + 10% Self-Weight against SBC = {sbc} kN/m²")
             
             footing_results = []
@@ -455,15 +495,25 @@ if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="st
                 col_c = max(map(float, data['Col_Size'].split('x'))) / 1000.0
                 proj_x = max((Side_L - col_c) / 2.0, 0.01)
                 Mu_footing = net_upward_p * Side_L * (proj_x**2) / 2.0
+                
                 d_req_footing = math.sqrt((Mu_footing * 1e6) / ((0.133 if fy>=500 else 0.138) * max(fck, 1.0) * (Side_L*1000)))
                 D_prov = max(300, math.ceil((d_req_footing + 50) / 50.0) * 50)
+                d_eff_footing = D_prov - 50
+                
+                sqrt_ftg = max(1 - (4.6 * Mu_footing * 1e6) / (max(fck, 1.0) * (Side_L*1000) * d_eff_footing**2), 0)
+                Ast_req_ftg = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(sqrt_ftg)) * (Side_L*1000) * d_eff_footing
+                Ast_min_ftg = 0.0012 * (Side_L*1000) * D_prov
+                Ast_ftg = max(Ast_req_ftg, Ast_min_ftg)
+                
+                ast_per_meter = Ast_ftg / Side_L
+                ftg_spacing = min(math.floor(1000 / (ast_per_meter / 113.1) / 10)*10, 300) # Using T12 bars
                 
                 footing_results.append({
                     "Node ID": f"N{nid}",
                     "Factored Pu (kN)": round(data['Pu'], 1),
-                    "Service P (kN)": round(P_service, 1),
                     "Footing Size (m)": f"{Side_L} x {Side_L}",
-                    "Min Depth (mm)": int(D_prov)
+                    "Pad Depth (mm)": int(D_prov),
+                    "Base Mesh (B/W)": f"T12 @ {int(ftg_spacing)} c/c"
                 })
                 
             st.dataframe(pd.DataFrame(footing_results), width="stretch")
