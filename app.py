@@ -142,7 +142,6 @@ def parse_rebar_string(rebar_str):
 
 # --- EXACT IS 456 DYNAMIC SHEAR & TORSION CALCULATION ---
 def calculate_shear_spacing(Ve_kN, b, d, fck, fy, is_column=False):
-    # Ve_kN is now the Equivalent Shear (Vu + equivalent torsion)
     Ve = Ve_kN * 1000
     tau_ve = Ve / (b * d)
     tau_c_max = 0.62 * math.sqrt(max(fck, 1.0))
@@ -162,11 +161,8 @@ def design_beam_is456(b_m, h_m, Mu_pos_kNm, Mu_neg_kNm, Vu_kN, Tu_kNm, fck, fy):
     b, h = max(b_m * 1000, 1.0), max(h_m * 1000, 1.0)
     d = max(h - 40, 1.0) 
     
-    # Equivalent Torsion Formulas
     Ve_kN = Vu_kN + 1.6 * (Tu_kNm / b_m) if b_m > 0 else Vu_kN
     Mt_kNm = Tu_kNm * (1 + (h_m / b_m)) / 1.7 if b_m > 0 else 0
-    
-    # Equivalent Moments for Top (Neg) and Bottom (Pos)
     Me_pos = Mu_pos_kNm + Mt_kNm
     Me_neg = Mu_neg_kNm + Mt_kNm 
     
@@ -178,7 +174,7 @@ def design_beam_is456(b_m, h_m, Mu_pos_kNm, Mu_neg_kNm, Vu_kN, Tu_kNm, fck, fy):
         else:
             ast1 = (0.5 * fck / fy) * (1 - math.sqrt(max(1 - (4.6 * Mu_lim) / max(fck * b * d**2, 1.0), 0))) * b * d
             ast = ast1 + ((Me - Mu_lim) / max(0.87 * fy * d, 1.0))
-        return max(ast, 0.85 * b * d / max(fy, 1.0)) # Code Minimum Enforcement
+        return max(ast, 0.85 * b * d / max(fy, 1.0))
 
     Ast_bot = calc_ast(Me_pos)
     Ast_top = calc_ast(Me_neg)
@@ -208,7 +204,7 @@ def design_column_is456(b_m, h_m, Pu_kN, Mu_kNm, Vu_kN, Tu_kNm, fck, fy):
     sv, shear_stat = calculate_shear_spacing(Ve_kN, b, d, fck, fy, is_column=True)
     if "Fail" in shear_stat: status += " | Shear/Torsion Fail"
     return round(Asc_req, 1), sv, status
-    
+
 # --- ENGINE: BUILD MESH ---
 def build_mesh():
     nodes, elements = [], []
@@ -436,10 +432,8 @@ if st.button("🚀 Execute Analysis, Code Checks & Generate BBS", type="primary"
             
             axial = max(abs(f_int[0]), abs(f_int[6]))
             shear = max(abs(f_int[1]), abs(f_int[2]), abs(f_int[7]), abs(f_int[8]))
-            #---moment_max = max(abs(f_int[5]), abs(f_int[11])) #
             torsion_max = max(abs(f_int[3]), abs(f_int[9]))
             
-            # Distinct Support (Negative) and Span (Positive) Moments
             Mu_neg_max = max(abs(f_int[5]), abs(f_int[11]))
             Mu_pos_max = 0.0
             
@@ -447,7 +441,6 @@ if st.button("🚀 Execute Analysis, Code Checks & Generate BBS", type="primary"
                 w, Vy_i = el['applied_w'], f_int[1] 
                 x_max = Vy_i / max(w, 0.001) if w > 0 else -1
                 if 0 < x_max < el['L']:
-                    # Algebraic max positive moment in span
                     M_span = f_int[5] + (Vy_i * x_max) - (0.5 * w * x_max**2)
                     Mu_pos_max = abs(M_span)
 
@@ -457,12 +450,11 @@ if st.button("🚀 Execute Analysis, Code Checks & Generate BBS", type="primary"
             analysis_data.append({
                 "Member ID": f"M{el['id']}", "Type": el['type'], "Floor": el['ni_n']['floor'],
                 "Length (m)": round(el['L'], 2), "Axial (kN)": round(axial, 1), 
-                "Shear (kN)": round(shear, 1), "Moment (kN.m)": round(moment_max, 1)
+                "Shear (kN)": round(shear, 1), "Max Mu (kN.m)": round(max(Mu_pos_max, Mu_neg_max), 1)
             })
 
-b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
+            b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
             if el['type'] == 'Beam':
-                # PASS BOTH POSITIVE AND NEGATIVE MOMENTS
                 req_ast_bot, req_ast_top, sv_mm, stat = design_beam_is456(b_m, h_m, Mu_pos_max, Mu_neg_max, shear, torsion_max, fck, fy)
                 rebar_bot = get_rebar_detail(req_ast_bot, "Beam")
                 rebar_top = get_rebar_detail(req_ast_top, "Beam")
@@ -474,7 +466,6 @@ b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
                     "Bot Rebar": rebar_bot, "Top Rebar": rebar_top, "Ties": f"T8 @ {sv_mm} c/c", "Status": stat
                 })
                 
-                # --- BBS GENERATION FOR BEAMS (TOP AND BOTTOM) ---
                 for (count, dia) in parse_rebar_string(rebar_bot):
                     cut_L = el['L'] - (2 * 0.025) + (50 * dia/1000.0) 
                     wt = (dia**2 / 162.0) * cut_L * count
@@ -486,7 +477,7 @@ b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
                     bbs_records.append({"Element": f"M{el['id']} (Beam)", "Location": f"Floor {el['ni_n']['floor']}", "Bar Type": "Top Support Tension", "Dia (mm)": dia, "No. Bars": count, "Cut Length (m)": round(cut_L, 2), "Total Wt (kg)": round(wt, 2)})
 
             else:
-                moment_max = max(Mu_neg_max, Mu_pos_max) # Columns use absolute envelope
+                moment_max = max(Mu_neg_max, Mu_pos_max) 
                 req_ast, sv_mm, stat = design_column_is456(b_m, h_m, axial, moment_max, shear, torsion_max, fck, fy)
                 rebar_str = get_rebar_detail(req_ast, "Column")
                 
@@ -497,13 +488,11 @@ b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
                     "Bot Rebar": "-", "Top Rebar": rebar_str, "Ties": f"T8 @ {sv_mm} c/c", "Status": stat
                 })
                 
-                # --- BBS GENERATION FOR COLUMNS ---
                 for (count, dia) in parse_rebar_string(rebar_str):
                     cut_L = el['L'] + (50 * dia/1000.0) 
                     wt = (dia**2 / 162.0) * cut_L * count
                     bbs_records.append({"Element": f"M{el['id']} (Column)", "Location": f"Floor {el['ni_n']['floor']}", "Bar Type": "Main Vertical", "Dia (mm)": dia, "No. Bars": count, "Cut Length (m)": round(cut_L, 2), "Total Wt (kg)": round(wt, 2)})
 
-            # Shear Ties (Same for both)
             s_cut = 2*(b_m - 0.05 + h_m - 0.05) + (24 * 0.008) if el['type'] == 'Beam' else 2*(b_m - 0.08 + h_m - 0.08) + (24 * 0.008)
             n_st = int(el['L'] / (sv_mm / 1000.0)) + 1
             wt_st = (8**2 / 162.0) * s_cut * n_st
@@ -529,55 +518,43 @@ b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
             Lx, Ly = max(min(x_spans) if x_spans else 1.0, 0.001), max(max(y_spans) if y_spans else 1.0, 0.001)
             ratio = Ly / Lx
             
-            # Restrained Slab Coefficients (Approximation of IS 456 Table 26 for interior panels)
             alpha_pos = np.interp(ratio, [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0], [0.032, 0.037, 0.043, 0.047, 0.051, 0.053, 0.060, 0.065]) if ratio <= 2.0 else 0.125
             alpha_neg = np.interp(ratio, [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0], [0.043, 0.048, 0.057, 0.064, 0.068, 0.072, 0.080, 0.087]) if ratio <= 2.0 else 0.125
-            
             w_u_slab = 1.5 * (live_load + floor_finish + (slab_thick/1000.0)*25.0)
             
-            # Moments
             Mu_pos = alpha_pos * w_u_slab * (Lx**2)
             Mu_neg = alpha_neg * w_u_slab * (Lx**2)
             d_eff_slab = max(slab_thick - 25, 1.0)
             
-            # Positive Steel (Bottom)
             sqrt_pos = max(1 - (4.6 * Mu_pos * 1e6) / (max(fck, 1.0) * 1000 * d_eff_slab**2), 0)
             Ast_req_pos = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(sqrt_pos)) * 1000 * d_eff_slab
             Ast_pos = max(Ast_req_pos, 0.0012 * 1000 * slab_thick)
-            spc_pos = min(math.floor(1000 / (Ast_pos / 78.5) / 10)*10, 300) # T10
+            spc_pos = min(math.floor(1000 / (Ast_pos / 78.5) / 10)*10, 300) 
             
-            # Negative Steel (Top Extra over Supports)
             sqrt_neg = max(1 - (4.6 * Mu_neg * 1e6) / (max(fck, 1.0) * 1000 * d_eff_slab**2), 0)
             Ast_req_neg = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(sqrt_neg)) * 1000 * d_eff_slab
             Ast_neg = max(Ast_req_neg, 0.0012 * 1000 * slab_thick)
-            spc_neg = min(math.floor(1000 / (Ast_neg / 78.5) / 10)*10, 300) # T10
+            spc_neg = min(math.floor(1000 / (Ast_neg / 78.5) / 10)*10, 300) 
             
-            # Torsion Steel at Discontinuous Corners (IS 456 D-1.8: 3/4 of max pos Ast)
             Ast_tor = 0.75 * Ast_pos
-            spc_tor = min(math.floor(1000 / (Ast_tor / 78.5) / 10)*10, 300) # T10
+            spc_tor = min(math.floor(1000 / (Ast_tor / 78.5) / 10)*10, 300) 
             tor_grid_len = Lx / 5.0
             
-            # Depth Check (Governed by Max Negative Moment)
             d_req_flex = math.sqrt((max(Mu_pos, Mu_neg) * 1e6) / ((0.133 if fy>=500 else 0.138) * max(fck, 1.0) * 1000))
-            d_req_def = (Lx * 1000) / 28.0 # Cont. Slab deflection ratio
+            d_req_def = (Lx * 1000) / 28.0 
             safe_slab = slab_thick >= max(d_req_flex, d_req_def) + 25
             
-            # --- BBS: Monolithic Slab Addition ---
             for flr in range(1, len(floors_df)+1):
-                # Bottom Main & Dist
                 n_main, l_main = int(Ly / (spc_pos/1000.0)) + 1, Lx + (2 * 50 * 10/1000.0)
                 n_dist, l_dist = int(Lx / 0.20) + 1, Ly + (2 * 50 * 10/1000.0)
                 bbs_records.append({"Element": "Slab", "Location": f"Flr {flr}", "Bar Type": "Bot Main (T10)", "Dia (mm)": 10, "No. Bars": n_main, "Cut Length (m)": round(l_main,2), "Total Wt (kg)": round((10**2/162.0)*l_main*n_main,2)})
                 bbs_records.append({"Element": "Slab", "Location": f"Flr {flr}", "Bar Type": "Bot Dist (T10@200)", "Dia (mm)": 10, "No. Bars": n_dist, "Cut Length (m)": round(l_dist,2), "Total Wt (kg)": round((10**2/162.0)*l_dist*n_dist,2)})
                 
-                # Top Extra (Negative Moment) over supports
-                # Cut length approx 0.3Lx on both sides of beam = 0.6Lx
                 l_top = 0.6 * Lx
                 n_top = int(Ly / (spc_neg/1000.0)) + 1
                 bbs_records.append({"Element": "Slab", "Location": f"Flr {flr}", "Bar Type": "Top Extra Support (T10)", "Dia (mm)": 10, "No. Bars": n_top*2, "Cut Length (m)": round(l_top,2), "Total Wt (kg)": round((10**2/162.0)*l_top*(n_top*2),2)})
                 
-                # Corner Torsion Mesh (4 Outer Corners)
-                n_tor = int(tor_grid_len / (spc_tor/1000.0)) * 2 # Both ways
+                n_tor = int(tor_grid_len / (spc_tor/1000.0)) * 2 
                 bbs_records.append({"Element": "Slab", "Location": f"Flr {flr} Corners", "Bar Type": "Torsion Mesh (T10)", "Dia (mm)": 10, "No. Bars": n_tor*4, "Cut Length (m)": round(tor_grid_len,2), "Total Wt (kg)": round((10**2/162.0)*tor_grid_len*(n_tor*4),2)})
 
             st.markdown("### IS 456 Restrained Two-Way Slab Check")
@@ -585,10 +562,7 @@ b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
             st.write(f"- **Required Thickness:** {round(max(d_req_flex, d_req_def)+25, 1)} mm | **Provided:** {slab_thick} mm")
             
             if safe_slab: 
-                st.success(f"""✅ Slab Safe. 
-                \n- **Bot Span Mesh:** T10 @ {int(spc_pos)} c/c
-                \n- **Top Support (Hogging):** T10 @ {int(spc_neg)} c/c
-                \n- **Corner Torsion Mesh:** T10 @ {int(spc_tor)} c/c (over {round(tor_grid_len, 2)}m length)""")
+                st.success(f"✅ Slab Safe. \n- **Bot Span Mesh:** T10 @ {int(spc_pos)} c/c\n- **Top Support (Hogging):** T10 @ {int(spc_neg)} c/c\n- **Corner Torsion Mesh:** T10 @ {int(spc_tor)} c/c (over {round(tor_grid_len, 2)}m)")
             else: 
                 st.error("❌ Slab Fails. Increase Thickness.")
             st.divider()
