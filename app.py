@@ -7,8 +7,8 @@ import copy
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Practical 3D Frame Analyzer", layout="wide")
-st.title("🏗️ Practical 3D Frame Analysis Engine")
-st.caption("Yield-Line Theory | Rigid Diaphragm Shear Distribution | Cracked Section Modifiers")
+st.title("🏗️ Advanced 3D Frame Validation Engine")
+st.caption("Rigid Diaphragms | True Seismic Mass Integration | Column 3D Tensors")
 
 # --- INITIALIZE STATE ---
 if 'grids' not in st.session_state:
@@ -18,7 +18,8 @@ if 'grids' not in st.session_state:
     st.session_state.cols = pd.DataFrame({
         "Col_ID": ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9"],
         "X_Grid": ["A", "B", "C", "A", "B", "C", "A", "B", "C"], 
-        "Y_Grid": ["1", "1", "1", "2", "2", "2", "3", "3", "3"]
+        "Y_Grid": ["1", "1", "1", "2", "2", "2", "3", "3", "3"],
+        "X_Offset (m)": [0.0]*9, "Y_Offset (m)": [0.0]*9, "Angle (deg)": [0.0]*9
     })
     st.session_state.grids = True
 
@@ -30,7 +31,7 @@ E_conc = 5000 * math.sqrt(fck) * 1000  # kN/m^2
 G_conc = E_conc / (2 * (1 + 0.2))
 
 st.sidebar.header("2. Section Sizes (mm)")
-col_size = st.sidebar.text_input("Column (b x h)", "300x450")
+col_size = st.sidebar.text_input("Column (b x h)", "230x450")
 beam_size = st.sidebar.text_input("Beam (b x h)", "230x400")
 
 st.sidebar.header("3. Applied Loads (IS 875)")
@@ -76,33 +77,40 @@ for _, r in floors_df.iterrows():
 # --- ENGINE: BUILD MESH ---
 def build_mesh():
     nodes, elements = [], []
-    x_map = {str(r['Grid_ID']): float(r['X_Coord (m)']) for _, r in x_grids_df.iterrows()}
-    y_map = {str(r['Grid_ID']): float(r['Y_Coord (m)']) for _, r in y_grids_df.iterrows()}
+    x_map = {str(r['Grid_ID']).strip(): float(r['X_Coord (m)']) for _, r in x_grids_df.iterrows() if pd.notna(r['Grid_ID'])}
+    y_map = {str(r['Grid_ID']).strip(): float(r['Y_Coord (m)']) for _, r in y_grids_df.iterrows() if pd.notna(r['Grid_ID'])}
     
     primary_xy = []
     for _, r in cols_df.iterrows():
-        xg, yg = str(r.get('X_Grid')), str(r.get('Y_Grid'))
+        xg, yg = str(r.get('X_Grid', '')).strip(), str(r.get('Y_Grid', '')).strip()
         if xg in x_map and yg in y_map:
-            primary_xy.append({'x': x_map[xg], 'y': y_map[yg]})
+            px = x_map[xg] + float(r.get('X_Offset (m)', 0.0))
+            py = y_map[yg] + float(r.get('Y_Offset (m)', 0.0))
+            ang = float(r.get('Angle (deg)', 0.0))
+            primary_xy.append({'x': px, 'y': py, 'angle': ang})
             
     nid = 0
+    # Generate Physical Nodes
     for f in range(len(floors_df) + 1):
         for pt in primary_xy:
-            nodes.append({'id': nid, 'x': pt['x'], 'y': pt['y'], 'z': z_elevs.get(f, 0.0), 'floor': f})
+            nodes.append({'id': nid, 'x': pt['x'], 'y': pt['y'], 'z': z_elevs.get(f, 0.0), 'floor': f, 'angle': pt['angle'], 'is_dummy': False})
             nid += 1
             
     eid = 0
+    # Generate Columns
     for z in range(len(floors_df)):
-        b_nodes = [n for n in nodes if n['floor'] == z]
-        t_nodes = [n for n in nodes if n['floor'] == z + 1]
+        b_nodes = [n for n in nodes if n['floor'] == z and not n['is_dummy']]
+        t_nodes = [n for n in nodes if n['floor'] == z + 1 and not n['is_dummy']]
         for bn in b_nodes:
             tn = next((n for n in t_nodes if abs(n['x']-bn['x'])<0.01 and abs(n['y']-bn['y'])<0.01), None)
             if tn:
-                elements.append({'id': eid, 'ni': bn['id'], 'nj': tn['id'], 'type': 'Column', 'size': col_size, 'dir': 'Z'})
+                elements.append({'id': eid, 'ni': bn['id'], 'nj': tn['id'], 'type': 'Column', 'size': col_size, 'dir': 'Z', 'angle': bn['angle']})
                 eid += 1
                 
+    # Generate Beams (Tolerance 0.1m)
     for z in range(1, len(floors_df) + 1):
-        f_nodes = [n for n in nodes if n['floor'] == z]
+        f_nodes = [n for n in nodes if n['floor'] == z and not n['is_dummy']]
+        
         y_grps = {}
         for n in f_nodes:
             matched = False
@@ -112,7 +120,7 @@ def build_mesh():
         for yk, grp in y_grps.items():
             grp = sorted(grp, key=lambda k: k['x'])
             for i in range(len(grp)-1):
-                elements.append({'id': eid, 'ni': grp[i]['id'], 'nj': grp[i+1]['id'], 'type': 'Beam', 'size': beam_size, 'dir': 'X'})
+                elements.append({'id': eid, 'ni': grp[i]['id'], 'nj': grp[i+1]['id'], 'type': 'Beam', 'size': beam_size, 'dir': 'X', 'angle': 0.0})
                 eid += 1
                 
         x_grps = {}
@@ -124,28 +132,44 @@ def build_mesh():
         for xk, grp in x_grps.items():
             grp = sorted(grp, key=lambda k: k['y'])
             for i in range(len(grp)-1):
-                elements.append({'id': eid, 'ni': grp[i]['id'], 'nj': grp[i+1]['id'], 'type': 'Beam', 'size': beam_size, 'dir': 'Y'})
+                elements.append({'id': eid, 'ni': grp[i]['id'], 'nj': grp[i+1]['id'], 'type': 'Beam', 'size': beam_size, 'dir': 'Y', 'angle': 0.0})
                 eid += 1
                 
-    return nodes, elements
+    # Generate Rigid Diaphragm Master Nodes & Struts
+    diaphragm_nodes = {}
+    for z in range(1, len(floors_df) + 1):
+        f_nodes = [n for n in nodes if n['floor'] == z and not n['is_dummy']]
+        if f_nodes:
+            xc = sum(n['x'] for n in f_nodes) / len(f_nodes)
+            yc = sum(n['y'] for n in f_nodes) / len(f_nodes)
+            dummy_node = {'id': nid, 'x': xc, 'y': yc, 'z': z_elevs.get(z, 0.0), 'floor': z, 'angle': 0.0, 'is_dummy': True}
+            nodes.append(dummy_node)
+            diaphragm_nodes[z] = dummy_node
+            nid += 1
+            
+            for fn in f_nodes:
+                elements.append({'id': eid, 'ni': dummy_node['id'], 'nj': fn['id'], 'type': 'Diaphragm', 'size': '0x0', 'dir': 'D', 'angle': 0.0})
+                eid += 1
+                
+    return nodes, elements, diaphragm_nodes
 
-nodes, elements = build_mesh()
+nodes, elements, diaphragm_nodes = build_mesh()
 
 # --- RENDER 3D MODEL ---
 st.subheader("🖥️ 3D Architectural Viewport")
 fig = go.Figure()
 for el in elements:
+    if el['type'] == 'Diaphragm': continue
     ni = next(n for n in nodes if n['id'] == el['ni'])
     nj = next(n for n in nodes if n['id'] == el['nj'])
     color = '#1f77b4' if el['type'] == 'Column' else '#d62728'
     fig.add_trace(go.Scatter3d(x=[ni['x'], nj['x']], y=[ni['y'], nj['y']], z=[ni['z'], nj['z']], mode='lines', line=dict(color=color, width=5), hoverinfo='text', text=f"ID: {el['id']} ({el['type']})", showlegend=False))
-fig.add_trace(go.Scatter3d(x=[n['x'] for n in nodes], y=[n['y'] for n in nodes], z=[n['z'] for n in nodes], mode='markers', marker=dict(size=3, color='black'), hoverinfo='none', showlegend=False))
+fig.add_trace(go.Scatter3d(x=[n['x'] for n in nodes if not n['is_dummy']], y=[n['y'] for n in nodes if not n['is_dummy']], z=[n['z'] for n in nodes if not n['is_dummy']], mode='markers', marker=dict(size=3, color='black'), hoverinfo='none', showlegend=False))
 fig.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'), margin=dict(l=0, r=0, b=0, t=0), height=450)
 st.plotly_chart(fig, use_container_width=True)
 
 # --- ENGINE: MATHS & SOLVER ---
 def calc_yield_line_udl(ni, nj, el_dir, q_area):
-    """Calculates true 2D Yield Line triangular/trapezoidal equivalent loads."""
     L_beam = math.sqrt((nj['x']-ni['x'])**2 + (nj['y']-ni['y'])**2)
     if L_beam < 0.1: return 0.0
     
@@ -162,14 +186,15 @@ def calc_yield_line_udl(ni, nj, el_dir, q_area):
         
     def get_eq_load(Lb, Lp, q):
         if Lp <= 0.01: return 0.0
-        if Lb >= Lp: # Trapezoidal load (Long span)
-            return (q * Lp / 6.0) * (3.0 - (Lp / Lb)**2)
-        else: # Triangular load (Short span)
-            return (q * Lb / 3.0)
+        if Lb >= Lp: return (q * Lp / 6.0) * (3.0 - (Lp / Lb)**2)
+        else: return (q * Lb / 3.0)
             
     return get_eq_load(L_beam, L_perp1, q_area) + get_eq_load(L_beam, L_perp2, q_area)
 
 def get_props(size_str, el_type):
+    if el_type == 'Diaphragm':
+        return 100.0, 1e-6, 1e-6, 1e-6 # Infinite Area, Zero Bending Stiffness
+        
     b, h = map(float, size_str.split('x'))
     b, h = b/1000.0, h/1000.0
     A = b * h
@@ -195,38 +220,44 @@ def local_k(A, Iy, Iz, J, L):
     k[1,7]=k[7,1] = -12*E_conc*Iz/L**3; k[5,11]=k[11,5] = 2*E_conc*Iz/L
     return k + (np.eye(12) * 1e-9) 
 
-def transform_matrix(ni, nj):
+def transform_matrix(ni, nj, angle_deg):
     dx, dy, dz = nj['x']-ni['x'], nj['y']-ni['y'], nj['z']-ni['z']
     L = math.sqrt(dx**2 + dy**2 + dz**2)
     if L == 0: return np.eye(12)
     cx, cy, cz = dx/L, dy/L, dz/L
+    
     if abs(cx) < 1e-6 and abs(cy) < 1e-6:
-        lam = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]]) if cz > 0 else np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]])
+        lam = np.array([[0, 0, 1*np.sign(cz)], [0, 1, 0], [-1*np.sign(cz), 0, 0]])
     else:
         D = math.sqrt(cx**2 + cy**2)
         lam = np.array([[cx, cy, cz], [-cx*cz/D, -cy*cz/D, D], [-cy/D, cx/D, 0]])
+        
+    # True 3D Roll Transformation for Columns
+    if angle_deg != 0.0:
+        rad = math.radians(angle_deg)
+        c, s = math.cos(rad), math.sin(rad)
+        R = np.array([[1, 0, 0], [0, c, s], [0, -s, c]])
+        lam = R @ lam
+        
     T = np.zeros((12, 12))
     for i in range(4): T[i*3:(i+1)*3, i*3:(i+1)*3] = lam
     return T
 
 st.divider()
 
-if st.button("🚀 Execute Real-World Analysis Matrix", type="primary", use_container_width=True):
-    with st.spinner("Compiling Global Seismic Mass & Stiffness Matrices..."):
+if st.button("🚀 Execute Validation Matrix", type="primary", use_container_width=True):
+    with st.spinner("Applying Kinematic Constraints & Synthesizing Local Gradients..."):
         ndof = len(nodes) * 6
         K_global = np.zeros((ndof, ndof))
         F_global = np.zeros(ndof)
         
-        # PRE-COMPUTE PROPERTIES & SEISMIC MASS
         floor_seismic_W = {z: 0.0 for z in range(1, len(floors_df)+1)}
-        total_floor_area = (max(x_coords_sorted)-min(x_coords_sorted)) * (max(y_coords_sorted)-min(y_coords_sorted))
         area_dl = (slab_thick/1000.0)*25.0 + floor_finish
         total_q_area = (f_dl * area_dl) + (f_ll * live_load)
         
-        for f in range(1, len(floors_df)+1):
-            floor_seismic_W[f] += total_floor_area * (area_dl + 0.25*live_load)
-            
+        # EXACT LOCAL MASS LUMPING
         for el in elements:
+            if el['type'] == 'Diaphragm': continue
             ni = next(n for n in nodes if n['id'] == el['ni'])
             nj = next(n for n in nodes if n['id'] == el['nj'])
             L = math.sqrt((nj['x']-ni['x'])**2 + (nj['y']-ni['y'])**2 + (nj['z']-ni['z'])**2)
@@ -235,20 +266,27 @@ if st.button("🚀 Execute Real-World Analysis Matrix", type="primary", use_cont
             A, Iy, Iz, J = get_props(el['size'], el['type'])
             el['A'], el['Iy'], el['Iz'], el['J'] = A, Iy, Iz, J
             
-            # Aggregate Structural Mass
             if el['type'] == 'Beam':
-                f = ni['floor']
-                floor_seismic_W[f] += (A * 25.0 * L) + ((wall_thick/1000.0) * 3.0 * 20.0 * L)
+                w_slab_mass = calc_yield_line_udl(ni, nj, el['dir'], area_dl + 0.25*live_load)
+                w_wall_mass = (wall_thick/1000.0) * 3.0 * 20.0
+                w_self_mass = A * 25.0
+                floor_seismic_W[ni['floor']] += (w_slab_mass + w_wall_mass + w_self_mass) * L
             elif el['type'] == 'Column':
-                f_bot, f_top = ni['floor'], nj['floor']
                 wt = A * 25.0 * L
+                f_bot, f_top = ni['floor'], nj['floor']
                 if f_bot > 0: floor_seismic_W[f_bot] += wt / 2.0
                 if f_top > 0: floor_seismic_W[f_top] += wt / 2.0
 
         # MATRIX ASSEMBLY
         for el in elements:
+            if 'L' not in el:
+                ni, nj = next(n for n in nodes if n['id'] == el['ni']), next(n for n in nodes if n['id'] == el['nj'])
+                el['L'] = math.sqrt((nj['x']-ni['x'])**2 + (nj['y']-ni['y'])**2 + (nj['z']-ni['z'])**2)
+                el['A'], el['Iy'], el['Iz'], el['J'] = get_props(el['size'], el['type'])
+                el['ni_n'], el['nj_n'] = ni, nj
+                
             k_loc = local_k(el['A'], el['Iy'], el['Iz'], el['J'], el['L'])
-            T = transform_matrix(el['ni_n'], el['nj_n'])
+            T = transform_matrix(el['ni_n'], el['nj_n'], el['angle'])
             k_glob = T.T @ k_loc @ T
             
             i_dof, j_dof = el['ni_n']['id'] * 6, el['nj_n']['id'] * 6
@@ -259,7 +297,6 @@ if st.button("🚀 Execute Real-World Analysis Matrix", type="primary", use_cont
                     K_global[idx[r], idx[c]] += k_glob[r, c]
                     
             if el['type'] == 'Beam':
-                # Yield Line Exact Trib. Loads
                 w_slab = calc_yield_line_udl(el['ni_n'], el['nj_n'], el['dir'], total_q_area)
                 w_wall = f_dl * (wall_thick/1000.0) * 3.0 * 20.0
                 w_self = f_dl * el['A'] * 25.0
@@ -271,28 +308,20 @@ if st.button("🚀 Execute Real-World Analysis Matrix", type="primary", use_cont
                 F_g = T.T @ F_loc
                 for i in range(12): F_global[idx[i]] -= F_g[i]
                 
-        # RIGID DIAPHRAGM SEISMIC DISTRIBUTION
+        # MASTER-SLAVE RIGID DIAPHRAGM FORCE INJECTION
         if f_eq > 0:
             total_W = sum(floor_seismic_W.values())
             Vb = eq_base_shear * total_W * f_eq
             sum_wh2 = sum([floor_seismic_W[z] * (z_elevs[z]**2) for z in floor_seismic_W])
             
             for z in range(1, len(floors_df)+1):
-                floor_f = Vb * (floor_seismic_W[z] * (z_elevs[z]**2)) / sum_wh2 if sum_wh2 > 0 else 0
-                
-                # Find columns attached to this floor to calculate lateral stiffness ratio
-                cols_on_floor = [el for el in elements if el['type'] == 'Column' and el['nj_n']['floor'] == z]
-                sum_kX = sum([12 * E_conc * c['Iz'] / c['L']**3 for c in cols_on_floor])
-                sum_kY = sum([12 * E_conc * c['Iy'] / c['L']**3 for c in cols_on_floor])
-                
-                for c in cols_on_floor:
-                    nid = c['nj_n']['id']
-                    kX = 12 * E_conc * c['Iz'] / c['L']**3
-                    kY = 12 * E_conc * c['Iy'] / c['L']**3
-                    F_global[nid * 6] += floor_f * (kX / sum_kX) if sum_kX > 0 else 0
-                    F_global[nid * 6 + 1] += floor_f * (kY / sum_kY) if sum_kY > 0 else 0
+                if sum_wh2 > 0 and z in diaphragm_nodes:
+                    floor_f = Vb * (floor_seismic_W[z] * (z_elevs[z]**2)) / sum_wh2
+                    # Apply purely to Master Node. The web distributes it, naturally inducing Torsion!
+                    d_id = diaphragm_nodes[z]['id']
+                    F_global[d_id * 6] += floor_f  # Push in X direction
 
-        # SOLVER
+        # LEAST SQUARES SOLVER
         fixed = [n['id']*6 + d for n in nodes if n['z'] == 0 for d in range(6)]
         free = sorted(list(set(range(ndof)) - set(fixed)))
         
@@ -303,10 +332,12 @@ if st.button("🚀 Execute Real-World Analysis Matrix", type="primary", use_cont
         U_glob = np.zeros(ndof)
         U_glob[free] = U_free
         
-        # EXTRACT FORCES
+        # EXTRACT FORCES & MOMENT RECOVERY
         res_data = []
         for el in elements:
-            T = transform_matrix(el['ni_n'], el['nj_n'])
+            if el['type'] == 'Diaphragm': continue
+            
+            T = transform_matrix(el['ni_n'], el['nj_n'], el['angle'])
             k_loc = local_k(el['A'], el['Iy'], el['Iz'], el['J'], el['L'])
             
             i_dof, j_dof = el['ni_n']['id'] * 6, el['nj_n']['id'] * 6
@@ -317,15 +348,18 @@ if st.button("🚀 Execute Real-World Analysis Matrix", type="primary", use_cont
             axial = max(abs(f_int[0]), abs(f_int[6]))
             shear = max(abs(f_int[1]), abs(f_int[2]), abs(f_int[7]), abs(f_int[8]))
             
-            # Mid-Span Superposition
-            Mz_i, Mz_j = abs(f_int[5]), abs(f_int[11])
-            moment_max = max(Mz_i, Mz_j)
+            Mz_i, Mz_j = f_int[5], f_int[11]
+            moment_max = max(abs(Mz_i), abs(Mz_j))
             
             if el['type'] == 'Beam' and 'applied_w' in el:
                 w = el['applied_w']
-                # Parabolic span moment overlay
-                M_span = (w * (el['L']**2)) / 8.0 - (Mz_i + Mz_j) / 2.0
-                if M_span > 0: moment_max = max(moment_max, M_span)
+                Vy_i = f_int[1] 
+                x_max = Vy_i / w if w > 0 else -1
+                
+                # Precise Boundary Value Superposition
+                if 0 < x_max < el['L']:
+                    M_span = Mz_i + (Vy_i * x_max) - (0.5 * w * x_max**2)
+                    moment_max = max(moment_max, abs(M_span))
 
             res_data.append({
                 "ID": el['id'], "Type": el['type'], "Floor": el['ni_n']['floor'],
