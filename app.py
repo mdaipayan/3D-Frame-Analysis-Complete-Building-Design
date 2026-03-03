@@ -8,7 +8,7 @@ import copy
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Practical 3D Frame Analyzer & Designer", layout="wide")
 st.title("🏗️ 3D Frame Analysis & Complete Building Design")
-st.caption("Includes: Grouped Member Design | Real-World Mixed Rebar Detailing | Footing Sizing")
+st.caption("Includes: CSV Import/Export | Grouped Member Design | Real-World Detailing | Footing Sizing")
 
 # --- INITIALIZE STATE ---
 if 'grids' not in st.session_state:
@@ -21,7 +21,40 @@ if 'grids' not in st.session_state:
         "Y_Grid": ["1", "1", "1", "2", "2", "2", "3", "3", "3"],
         "X_Offset (m)": [0.0]*9, "Y_Offset (m)": [0.0]*9, "Angle (deg)": [0.0]*9
     })
+    st.session_state.last_uploaded = {}
     st.session_state.grids = True
+
+# --- SIDEBAR: CSV IMPORT / EXPORT ---
+st.sidebar.header("📂 CSV Import / Export")
+csv_choice = st.sidebar.selectbox("Select Table to Modify:", ["Floors", "X-Grids", "Y-Grids", "Columns"])
+
+# Mapping UI choice to session state variables
+mapping = {"Floors": "floors", "X-Grids": "x_grids", "Y-Grids": "y_grids", "Columns": "cols"}
+active_key = mapping[csv_choice]
+
+# Download Button
+csv_data = st.session_state[active_key].to_csv(index=False).encode('utf-8')
+st.sidebar.download_button(
+    label=f"⬇️ Download {csv_choice} (CSV)",
+    data=csv_data,
+    file_name=f"{active_key}_template.csv",
+    mime="text/csv",
+    width="stretch"
+)
+
+# Upload Button
+uploaded_csv = st.sidebar.file_uploader(f"⬆️ Upload {csv_choice} (CSV)", type=["csv"])
+if uploaded_csv is not None:
+    if st.session_state.last_uploaded.get(csv_choice) != uploaded_csv.name:
+        try:
+            new_df = pd.read_csv(uploaded_csv)
+            st.session_state[active_key] = new_df
+            st.session_state.last_uploaded[csv_choice] = uploaded_csv.name
+            st.rerun()
+        except Exception as e:
+            st.sidebar.error(f"Error reading CSV: {e}")
+
+st.sidebar.divider()
 
 # --- SIDEBAR: INPUTS ---
 st.sidebar.header("1. Material Properties")
@@ -97,7 +130,7 @@ def get_rebar_detail(ast_req, member_type="Beam"):
             d_sec = dias[i-1] 
             for n_main in [2, 3, 4]:
                 for n_sec in [1, 2, 3]:
-                    if n_main + n_sec <= 6: # Practical limit for standard beam widths
+                    if n_main + n_sec <= 6:
                         configs.append((n_main, d_main, n_sec, d_sec, n_main*areas[d_main] + n_sec*areas[d_sec]))
     else: 
         # Column 1. Single dia configs
@@ -108,7 +141,7 @@ def get_rebar_detail(ast_req, member_type="Beam"):
         for i in range(1, len(dias)):
             d_corner = dias[i]
             d_face = dias[i-1]
-            for n_face in [2, 4, 6, 8]: # Must be symmetric
+            for n_face in [2, 4, 6, 8]:
                 configs.append((4, d_corner, n_face, d_face, 4*areas[d_corner] + n_face*areas[d_face]))
 
     # Sort intelligently by Total Provided Area (least waste first)
@@ -321,8 +354,8 @@ def transform_matrix(ni, nj, angle_deg):
 
 st.divider()
 
-if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="stretch"):
-    with st.spinner("Processing Matrix, Extracting Forces & Detailing Members..."):
+if st.button("🚀 Execute Analysis & Extract Design Detailing", type="primary", width="stretch"):
+    with st.spinner("Processing Matrix, Extracting Forces & Detailing Rebar..."):
         ndof = len(nodes) * 6
         K_global = np.zeros((ndof, ndof))
         F_global = np.zeros(ndof)
@@ -452,7 +485,6 @@ if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="st
                 col_group = df_col.groupby(['Floor', 'Size (mm)']).agg(
                     Max_Pu=('Max Pu (kN)', 'max'), Max_Mu=('Max Mu (kN.m)', 'max'), Max_Ast=('Req Ast (mm²)', 'max')
                 ).reset_index()
-                # Apply the combination logic
                 col_group['Detailing (Mixed Rebar)'] = col_group['Max_Ast'].apply(lambda ast: get_rebar_detail(ast, "Column"))
                 st.subheader("Column Groups")
                 st.dataframe(col_group, width="stretch")
@@ -462,7 +494,6 @@ if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="st
                 beam_group = df_beam.groupby(['Floor', 'Size (mm)']).agg(
                     Max_Mu=('Max Mu (kN.m)', 'max'), Max_Ast=('Req Ast (mm²)', 'max')
                 ).reset_index()
-                # Apply the combination logic
                 beam_group['Detailing (Mixed Rebar)'] = beam_group['Max_Ast'].apply(lambda ast: get_rebar_detail(ast, "Beam"))
                 st.subheader("Beam Groups")
                 st.dataframe(beam_group, width="stretch")
