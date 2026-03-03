@@ -140,59 +140,74 @@ def parse_rebar_string(rebar_str):
             bars.append((int(n), int(d)))
     return bars
 
-# --- EXACT IS 456 DYNAMIC SHEAR CALCULATION ---
-def calculate_shear_spacing(Vu_kN, b, d, fck, fy, is_column=False):
-    Vu = Vu_kN * 1000
-    tau_v = Vu / (b * d)
-    tau_c_max = 0.62 * math.sqrt(fck)
+# --- EXACT IS 456 DYNAMIC SHEAR & TORSION CALCULATION ---
+def calculate_shear_spacing(Ve_kN, b, d, fck, fy, is_column=False):
+    # Ve_kN is now the Equivalent Shear (Vu + equivalent torsion)
+    Ve = Ve_kN * 1000
+    tau_ve = Ve / (b * d)
+    tau_c_max = 0.62 * math.sqrt(max(fck, 1.0))
     Asv = 2 * (math.pi * 8**2 / 4) # 2-Legged 8mm
-    tau_c = 0.25 * math.sqrt(fck) if not is_column else 0.35 * math.sqrt(fck)
+    tau_c = 0.25 * math.sqrt(fck) if not is_column else 0.35 * math.sqrt(fck) 
     
-    if tau_v > tau_c_max: return 100, "Shear Web Failure (Resize)"
+    if tau_ve > tau_c_max: return 100, "Shear/Torsion Web Failure (Resize)"
         
-    if tau_v <= tau_c: sv = (0.87 * fy * Asv) / (0.4 * b)
-    else: sv = (0.87 * fy * Asv * d) / max(Vu - (tau_c * b * d), 0.001)
+    if tau_ve <= tau_c: sv = (0.87 * fy * Asv) / (0.4 * b)
+    else: sv = (0.87 * fy * Asv * d) / max(Ve - (tau_c * b * d), 0.001)
         
     sv_max = min(0.75 * d, 300) if not is_column else min(b, 300)
     sv_final = max(min(math.floor(sv / 10) * 10, sv_max), 100) 
     return int(sv_final), "Safe"
 
-# --- IS 456 DESIGN FUNCTIONS ---
-def design_beam_is456(b_m, h_m, Mu_kNm, Vu_kN, fck, fy):
+def design_beam_is456(b_m, h_m, Mu_kNm, Vu_kN, Tu_kNm, fck, fy):
     b, h = max(b_m * 1000, 1.0), max(h_m * 1000, 1.0)
     d = max(h - 40, 1.0) 
-    Mu = Mu_kNm * 1e6 
+    
+    # 1. IS 456 Equivalent Torsion Formulas
+    Ve_kN = Vu_kN + 1.6 * (Tu_kNm / b_m) if b_m > 0 else Vu_kN
+    Mt_kNm = Tu_kNm * (1 + (h_m / b_m)) / 1.7 if b_m > 0 else 0
+    Me_kNm = Mu_kNm + Mt_kNm # Equivalent Bending Moment
+    
+    Me = Me_kNm * 1e6 
     Mu_lim = (0.133 if fy >= 500 else 0.138) * fck * b * d**2
     
     status = "Singly Reinf."
-    if Mu <= Mu_lim:
-        Ast_req = (0.5 * fck / fy) * (1 - math.sqrt(max(1 - (4.6 * Mu) / max(fck * b * d**2, 1.0), 0))) * b * d
+    if Me <= Mu_lim:
+        Ast_req = (0.5 * fck / fy) * (1 - math.sqrt(max(1 - (4.6 * Me) / max(fck * b * d**2, 1.0), 0))) * b * d
     else:
         Ast1 = (0.5 * fck / fy) * (1 - math.sqrt(max(1 - (4.6 * Mu_lim) / max(fck * b * d**2, 1.0), 0))) * b * d
-        Ast_req = Ast1 + ((Mu - Mu_lim) / max(0.87 * fy * d, 1.0))
+        Ast_req = Ast1 + ((Me - Mu_lim) / max(0.87 * fy * d, 1.0))
         status = "Doubly Reinf."
         
     Ast_req = max(Ast_req, 0.85 * b * d / max(fy, 1.0))
-    sv, shear_stat = calculate_shear_spacing(Vu_kN, b, d, fck, fy)
-    if "Fail" in shear_stat: status += " | Shear Fail"
+    sv, shear_stat = calculate_shear_spacing(Ve_kN, b, d, fck, fy)
+    
+    # IS 456 mandates closed stirrups for torsion. Tagging for BBS.
+    if Tu_kNm > 1.0: shear_stat += " (Closed Torsion Ties)"
+    if "Fail" in shear_stat: status += " | Shear/Torsion Fail"
+    
     return round(Ast_req, 1), sv, status
 
-def design_column_is456(b_m, h_m, Pu_kN, Mu_kNm, Vu_kN, fck, fy):
+def design_column_is456(b_m, h_m, Pu_kN, Mu_kNm, Vu_kN, Tu_kNm, fck, fy):
     b, h = max(b_m * 1000, 1.0), max(h_m * 1000, 1.0)
     Ag, d = b * h, max(h - 40, 1.0)
-    Pu, Mu = Pu_kN * 1000, Mu_kNm * 1e6 
+    
+    Ve_kN = Vu_kN + 1.6 * (Tu_kNm / b_m) if b_m > 0 else Vu_kN
+    Mt_kNm = Tu_kNm * (1 + (h_m / b_m)) / 1.7 if b_m > 0 else 0
+    Me_kNm = Mu_kNm + Mt_kNm 
+    
+    Pu, Me = Pu_kN * 1000, Me_kNm * 1e6 
     
     Asc_axial = (Pu - 0.4 * fck * Ag) / max(0.67 * fy - 0.4 * fck, 1.0) if Pu > 0.4 * fck * Ag else 0
-    Asc_req = max(Asc_axial + (Mu / max(0.87 * fy * d, 1.0)), 0.008 * Ag)
+    Asc_req = max(Asc_axial + (Me / max(0.87 * fy * d, 1.0)), 0.008 * Ag)
     
     status = "Safe"
     if Asc_req > 0.040 * Ag: status = "Over-Reinf (>4%)"
     if Pu > (0.45 * fck * Ag + 0.75 * fy * (0.04 * Ag)): status = "Crushing Fail"
     
-    sv, shear_stat = calculate_shear_spacing(Vu_kN, b, d, fck, fy, is_column=True)
-    if "Fail" in shear_stat: status += " | Shear Fail"
+    sv, shear_stat = calculate_shear_spacing(Ve_kN, b, d, fck, fy, is_column=True)
+    if "Fail" in shear_stat: status += " | Shear/Torsion Fail"
     return round(Asc_req, 1), sv, status
-
+    
 # --- ENGINE: BUILD MESH ---
 def build_mesh():
     nodes, elements = [], []
@@ -421,6 +436,7 @@ if st.button("🚀 Execute Analysis, Code Checks & Generate BBS", type="primary"
             axial = max(abs(f_int[0]), abs(f_int[6]))
             shear = max(abs(f_int[1]), abs(f_int[2]), abs(f_int[7]), abs(f_int[8]))
             moment_max = max(abs(f_int[5]), abs(f_int[11]))
+            torsion_max = max(abs(f_int[3]), abs(f_int[9]))
             
             if el['type'] == 'Beam' and 'applied_w' in el:
                 w, Vy_i = el['applied_w'], f_int[1] 
@@ -438,10 +454,11 @@ if st.button("🚀 Execute Analysis, Code Checks & Generate BBS", type="primary"
 
             b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
             if el['type'] == 'Beam':
-                req_ast, sv_mm, stat = design_beam_is456(b_m, h_m, moment_max, shear, fck, fy)
+                req_ast, sv_mm, stat = design_beam_is456(b_m, h_m, moment_max, shear, torsion_max, fck, fy)
                 rebar_str = get_rebar_detail(req_ast, "Beam")
+                
             else:
-                req_ast, sv_mm, stat = design_column_is456(b_m, h_m, axial, moment_max, shear, fck, fy)
+                req_ast, sv_mm, stat = design_column_is456(b_m, h_m, axial, moment_max, shear, torsion_max, fck, fy)
                 rebar_str = get_rebar_detail(req_ast, "Column")
                 
             design_data.append({
