@@ -6,9 +6,9 @@ import math
 import copy
 
 # --- PAGE SETUP ---
-st.set_page_config(page_title="Practical 3D Frame Analyzer", layout="wide")
-st.title("🏗️ Practical 3D Frame Analysis Engine")
-st.caption("Yield-Line Theory | Rigid Diaphragm Shear Distribution | Cracked Section Modifiers")
+st.set_page_config(page_title="Practical 3D Frame Analyzer & Designer", layout="wide")
+st.title("🏗️ Practical 3D Frame Analysis & Design Engine")
+st.caption("Yield-Line Theory | Rigid Diaphragms | IS 456 Reinforcement Design ($A_{st}$)")
 
 # --- INITIALIZE STATE ---
 if 'grids' not in st.session_state:
@@ -41,8 +41,9 @@ slab_thick = st.sidebar.number_input("Slab Thickness (mm)", value=150)
 wall_thick = st.sidebar.number_input("Wall Thickness (mm)", value=230)
 eq_base_shear = st.sidebar.slider("Seismic Base Shear Ah (%)", 0.0, 20.0, 2.5) / 100.0
 
-st.sidebar.header("4. Real-World Modifiers")
+st.sidebar.header("4. Engine Settings")
 apply_cracked_modifiers = st.sidebar.checkbox("Use IS 1893 Cracked Sections", value=True)
+run_design = st.sidebar.checkbox("Calculate IS 456 Reinforcement", value=True, help="Computes required Ast (Steel Area) based on generated forces.")
 
 st.sidebar.header("5. IS Code Combinations")
 combo = st.sidebar.selectbox("Select Load Combination", [
@@ -60,7 +61,6 @@ elif "1.5 EQ" in combo: f_dl, f_ll, f_eq = 1.5, 0.0, 1.5
 # --- GEOMETRY DATA EDITORS ---
 with st.expander("📐 Modify Building Grids & Geometry", expanded=False):
     col1, col2, col3, col4 = st.columns(4)
-    # Replaced use_container_width with width="stretch"
     with col1: st.write("Z-Elevations"); floors_df = st.data_editor(st.session_state.floors, num_rows="dynamic", width="stretch")
     with col2: st.write("X-Grids"); x_grids_df = st.data_editor(st.session_state.x_grids, num_rows="dynamic", width="stretch")
     with col3: st.write("Y-Grids"); y_grids_df = st.data_editor(st.session_state.y_grids, num_rows="dynamic", width="stretch")
@@ -74,6 +74,72 @@ curr_z = 0.0
 for _, r in floors_df.iterrows():
     curr_z += float(r['Height (m)'])
     z_elevs[int(r['Floor'])] = curr_z
+
+# --- IS 456 DESIGN FUNCTIONS ---
+def design_beam_is456(b_m, h_m, Mu_kNm, Vu_kN, fck, fy):
+    b, h = max(b_m * 1000, 1), max(h_m * 1000, 1) # Convert to mm
+    d = h - 40 # Effective depth (assume 40mm cover)
+    Mu = Mu_kNm * 1e6 # Convert to N.mm
+    
+    coeff = 0.133 if fy >= 500 else 0.138
+    Mu_lim = coeff * fck * b * d**2
+    
+    status = "Singly Reinforced"
+    if Mu == 0:
+        Ast_req = 0.0
+    elif Mu <= Mu_lim:
+        sqrt_term = 1 - (4.6 * Mu) / (fck * b * d**2)
+        sqrt_term = max(sqrt_term, 0)
+        Ast_req = (0.5 * fck / fy) * (1 - math.sqrt(sqrt_term)) * b * d
+    else:
+        # Doubly reinforced approximation
+        Ast1 = (0.5 * fck / fy) * (1 - math.sqrt(1 - (4.6 * Mu_lim) / (fck * b * d**2))) * b * d
+        Mu2 = Mu - Mu_lim
+        Ast2 = Mu2 / (0.87 * fy * (d - 40)) 
+        Ast_req = Ast1 + Ast2
+        status = "Doubly Reinforced"
+        
+    # Minimum steel rule
+    Ast_min = 0.85 * b * d / fy
+    Ast_req = max(Ast_req, Ast_min)
+    
+    # Shear check
+    tau_v = (Vu_kN * 1000) / (b * d) if b*d > 0 else 0
+    tau_c_max = 0.62 * math.sqrt(fck)
+    if tau_v > tau_c_max:
+        status = "Shear Web Failure (Resize)"
+        
+    return round(Ast_req, 1), status
+
+def design_column_is456(b_m, h_m, Pu_kN, Mu_kNm, fck, fy):
+    b, h = max(b_m * 1000, 1), max(h_m * 1000, 1) # Convert to mm
+    Ag = b * h
+    d = h - 40
+    
+    Pu = Pu_kN * 1000 # Convert to N
+    Mu = Mu_kNm * 1e6 # Convert to N.mm
+    
+    # Additive approximation for Column Steel (Axial + Flexure)
+    Asc_axial = (Pu - 0.4 * fck * Ag) / (0.67 * fy - 0.4 * fck) if Pu > 0.4 * fck * Ag else 0
+    Asc_bend = Mu / (0.87 * fy * (d - 40)) if d > 40 else 0
+    Asc_req = Asc_axial + Asc_bend
+    
+    # Code Limits
+    Ast_min = 0.008 * Ag
+    Ast_max = 0.040 * Ag # Practical maximum is 4%
+    
+    Asc_req = max(Asc_req, Ast_min)
+    status = "Safe"
+    
+    if Asc_req > Ast_max:
+        status = "Over-Reinforced (>4% Ag)"
+        
+    # Absolute Crushing Check
+    Pu_uz = 0.45 * fck * Ag + 0.75 * fy * Ast_max
+    if Pu > Pu_uz:
+        status = "Axial Crushing (Resize)"
+        
+    return round(Asc_req, 1), status
 
 # --- ENGINE: BUILD MESH ---
 def build_mesh():
@@ -193,7 +259,6 @@ def get_props(size_str, el_type):
         return 100.0, 1e-6, 1e-6, 1e-6 
         
     b, h = map(float, size_str.split('x'))
-    # SAFEGUARD: Prevent ZeroDivision if user enters "0x0"
     b, h = max(b/1000.0, 0.001), max(h/1000.0, 0.001)
     
     A = b * h
@@ -208,7 +273,6 @@ def get_props(size_str, el_type):
     return A, Iy, Iz, J
 
 def local_k(A, Iy, Iz, J, L):
-    # SAFEGUARD: Prevent ZeroDivision if elements have 0.0 length
     L = max(L, 0.001)
     k = np.zeros((12, 12))
     k[0,0]=k[6,6]= E_conc*A/L; k[0,6]=k[6,0]= -E_conc*A/L
@@ -245,8 +309,8 @@ def transform_matrix(ni, nj, angle_deg):
 
 st.divider()
 
-if st.button("🚀 Execute Validation Matrix", type="primary", width="stretch"):
-    with st.spinner("Applying Kinematic Constraints & Synthesizing Local Gradients..."):
+if st.button("🚀 Execute Analysis & Design Matrix", type="primary", width="stretch"):
+    with st.spinner("Solving Stiffness Matrix & Calculating Reinforcements..."):
         ndof = len(nodes) * 6
         K_global = np.zeros((ndof, ndof))
         F_global = np.zeros(ndof)
@@ -255,7 +319,6 @@ if st.button("🚀 Execute Validation Matrix", type="primary", width="stretch"):
         area_dl = (slab_thick/1000.0)*25.0 + floor_finish
         total_q_area = (f_dl * area_dl) + (f_ll * live_load)
         
-        # EXACT LOCAL MASS LUMPING
         for el in elements:
             if el['type'] == 'Diaphragm': continue
             ni = next(n for n in nodes if n['id'] == el['ni'])
@@ -277,7 +340,6 @@ if st.button("🚀 Execute Validation Matrix", type="primary", width="stretch"):
                 if f_bot > 0: floor_seismic_W[f_bot] += wt / 2.0
                 if f_top > 0: floor_seismic_W[f_top] += wt / 2.0
 
-        # MATRIX ASSEMBLY
         for el in elements:
             if 'L' not in el:
                 ni, nj = next(n for n in nodes if n['id'] == el['ni']), next(n for n in nodes if n['id'] == el['nj'])
@@ -308,7 +370,6 @@ if st.button("🚀 Execute Validation Matrix", type="primary", width="stretch"):
                 F_g = T.T @ F_loc
                 for i in range(12): F_global[idx[i]] -= F_g[i]
                 
-        # MASTER-SLAVE RIGID DIAPHRAGM FORCE INJECTION
         if f_eq > 0:
             total_W = sum(floor_seismic_W.values())
             Vb = eq_base_shear * total_W * f_eq
@@ -320,7 +381,6 @@ if st.button("🚀 Execute Validation Matrix", type="primary", width="stretch"):
                     d_id = diaphragm_nodes[z]['id']
                     F_global[d_id * 6] += floor_f  
 
-        # LEAST SQUARES SOLVER
         fixed = [n['id']*6 + d for n in nodes if n['z'] == 0 for d in range(6)]
         free = sorted(list(set(range(ndof)) - set(fixed)))
         
@@ -331,7 +391,6 @@ if st.button("🚀 Execute Validation Matrix", type="primary", width="stretch"):
         U_glob = np.zeros(ndof)
         U_glob[free] = U_free
         
-        # EXTRACT FORCES & MOMENT RECOVERY
         res_data = []
         for el in elements:
             if el['type'] == 'Diaphragm': continue
@@ -354,27 +413,40 @@ if st.button("🚀 Execute Validation Matrix", type="primary", width="stretch"):
                 w = el['applied_w']
                 Vy_i = f_int[1] 
                 x_max = Vy_i / w if w > 0 else -1
-                
                 if 0 < x_max < el['L']:
                     M_span = Mz_i + (Vy_i * x_max) - (0.5 * w * x_max**2)
                     moment_max = max(moment_max, abs(M_span))
 
+            # --- IS 456 REINFORCEMENT DESIGN CALCULATION ---
+            req_ast = 0.0
+            status = "Analysis Only"
+            
+            if run_design:
+                b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
+                if el['type'] == 'Beam':
+                    req_ast, status = design_beam_is456(b_m, h_m, moment_max, shear, fck, fy)
+                elif el['type'] == 'Column':
+                    req_ast, status = design_column_is456(b_m, h_m, axial, moment_max, fck, fy)
+
             res_data.append({
                 "ID": el['id'], "Type": el['type'], "Floor": el['ni_n']['floor'],
                 "Size (mm)": el['size'], "Length (m)": round(el['L'], 2),
-                "Axial (kN)": round(axial, 1), "Max Shear (kN)": round(shear, 1), "Max Moment (kN.m)": round(moment_max, 1)
+                "Axial (kN)": round(axial, 1), "Max Shear (kN)": round(shear, 1), 
+                "Max Moment (kN.m)": round(moment_max, 1),
+                "Req Ast (mm²)": req_ast if run_design else "-",
+                "Design Status": status
             })
 
         df_res = pd.DataFrame(res_data)
 
-        st.success("✅ Real-World Structural Analysis Complete!")
+        st.success("✅ Structural Analysis & IS 456 Design Complete!")
         
         colA, colB = st.columns(2)
         with colA:
-            st.subheader("Column Forces")
+            st.subheader("Column Design Output")
             st.dataframe(df_res[df_res['Type'] == 'Column'].reset_index(drop=True), width="stretch")
         with colB:
-            st.subheader("Beam Forces")
+            st.subheader("Beam Design Output")
             st.dataframe(df_res[df_res['Type'] == 'Beam'].reset_index(drop=True), width="stretch")
             
-        st.download_button(label="⬇️ Download Full Results (CSV)", data=df_res.to_csv(index=False), file_name=f"frame_results_{combo}.csv", mime="text/csv", width="stretch")
+        st.download_button(label="⬇️ Download Full Design Results (CSV)", data=df_res.to_csv(index=False), file_name=f"frame_design_{combo}.csv", mime="text/csv", width="stretch")
