@@ -8,7 +8,7 @@ import copy
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Practical 3D Frame Analyzer & Designer", layout="wide")
 st.title("🏗️ 3D Frame Analysis & Complete Building Design")
-st.caption("Includes: CSV Import/Export | Grouped Member Design | Real-World Detailing | Footing Sizing")
+st.caption("Includes: Automated Plan Validation | Combined Footing Auto-Sizing | Mixed Rebar Detailing")
 
 # --- INITIALIZE STATE ---
 if 'grids' not in st.session_state:
@@ -28,11 +28,9 @@ if 'grids' not in st.session_state:
 st.sidebar.header("📂 CSV Import / Export")
 csv_choice = st.sidebar.selectbox("Select Table to Modify:", ["Floors", "X-Grids", "Y-Grids", "Columns"])
 
-# Mapping UI choice to session state variables
 mapping = {"Floors": "floors", "X-Grids": "x_grids", "Y-Grids": "y_grids", "Columns": "cols"}
 active_key = mapping[csv_choice]
 
-# Download Button
 csv_data = st.session_state[active_key].to_csv(index=False).encode('utf-8')
 st.sidebar.download_button(
     label=f"⬇️ Download {csv_choice} (CSV)",
@@ -42,7 +40,6 @@ st.sidebar.download_button(
     width="stretch"
 )
 
-# Upload Button
 uploaded_csv = st.sidebar.file_uploader(f"⬆️ Upload {csv_choice} (CSV)", type=["csv"])
 if uploaded_csv is not None:
     if st.session_state.last_uploaded.get(csv_choice) != uploaded_csv.name:
@@ -60,7 +57,7 @@ st.sidebar.divider()
 st.sidebar.header("1. Material Properties")
 fck = st.sidebar.number_input("Concrete Grade (fck - MPa)", value=25.0, step=5.0)
 fy = st.sidebar.number_input("Steel Grade (fy - MPa)", value=500.0, step=85.0)
-E_conc = 5000 * math.sqrt(max(fck, 1.0)) * 1000  # kN/m^2
+E_conc = 5000 * math.sqrt(max(fck, 1.0)) * 1000 
 G_conc = E_conc / (2 * (1 + 0.2))
 
 st.sidebar.header("2. Section Sizes (mm)")
@@ -120,40 +117,28 @@ def get_rebar_detail(ast_req, member_type="Beam"):
     configs = []
 
     if member_type == "Beam":
-        # 1. Single diameter configs
         for d in [12, 16, 20, 25, 32]:
-            for n in [2, 3, 4, 5, 6]:
-                configs.append((n, d, 0, 0, n*areas[d]))
-        # 2. Mixed diameter configs (Max 1 step difference for realistic constructability)
+            for n in [2, 3, 4, 5, 6]: configs.append((n, d, 0, 0, n*areas[d]))
         for i in range(1, len(dias)):
-            d_main = dias[i]
-            d_sec = dias[i-1] 
+            d_main, d_sec = dias[i], dias[i-1] 
             for n_main in [2, 3, 4]:
                 for n_sec in [1, 2, 3]:
                     if n_main + n_sec <= 6:
                         configs.append((n_main, d_main, n_sec, d_sec, n_main*areas[d_main] + n_sec*areas[d_sec]))
     else: 
-        # Column 1. Single dia configs
         for d in [12, 16, 20, 25, 32]:
-            for n in [4, 6, 8, 10, 12, 16]:
-                configs.append((n, d, 0, 0, n*areas[d]))
-        # Column 2. Mixed dia configs (4 Corners + N Faces)
+            for n in [4, 6, 8, 10, 12, 16]: configs.append((n, d, 0, 0, n*areas[d]))
         for i in range(1, len(dias)):
-            d_corner = dias[i]
-            d_face = dias[i-1]
+            d_corner, d_face = dias[i], dias[i-1]
             for n_face in [2, 4, 6, 8]:
                 configs.append((4, d_corner, n_face, d_face, 4*areas[d_corner] + n_face*areas[d_face]))
 
-    # Sort intelligently by Total Provided Area (least waste first)
     configs.sort(key=lambda x: x[4])
 
     for c in configs:
         if c[4] >= ast_req:
-            if c[2] == 0:
-                return f"{c[0]}-T{c[1]} (Prv: {int(c[4])})"
-            else:
-                return f"{c[0]}-T{c[1]} + {c[2]}-T{c[3]} (Prv: {int(c[4])})"
-                
+            if c[2] == 0: return f"{c[0]}-T{c[1]} (Prv: {int(c[4])})"
+            else: return f"{c[0]}-T{c[1]} + {c[2]}-T{c[3]} (Prv: {int(c[4])})"
     return "Custom (High Ast)"
 
 # --- IS 456 DESIGN FUNCTIONS ---
@@ -354,8 +339,8 @@ def transform_matrix(ni, nj, angle_deg):
 
 st.divider()
 
-if st.button("🚀 Execute Analysis & Extract Design Detailing", type="primary", width="stretch"):
-    with st.spinner("Processing Matrix, Extracting Forces & Detailing Rebar..."):
+if st.button("🚀 Execute Analysis & Grouped Design", type="primary", width="stretch"):
+    with st.spinner("Processing Matrix, Extracting Forces & Detailing Members..."):
         ndof = len(nodes) * 6
         K_global = np.zeros((ndof, ndof))
         F_global = np.zeros(ndof)
@@ -446,7 +431,10 @@ if st.button("🚀 Execute Analysis & Extract Design Detailing", type="primary",
                     moment_max = max(moment_max, abs(f_int[5] + (Vy_i * x_max) - (0.5 * w * x_max**2)))
 
             if el['type'] == 'Column' and el['ni_n']['z'] == 0:
-                base_reactions[el['ni_n']['id']] = {'Pu': abs(f_int[0]), 'Col_Size': el['size']}
+                base_reactions[el['ni_n']['id']] = {
+                    'Pu': abs(f_int[0]), 'Col_Size': el['size'],
+                    'x': el['ni_n']['x'], 'y': el['ni_n']['y']
+                }
 
             analysis_data.append({
                 "Member ID": f"M{el['id']}", "Type": el['type'], "Floor": el['ni_n']['floor'],
@@ -517,7 +505,7 @@ if st.button("🚀 Execute Analysis & Extract Design Detailing", type="primary",
             Ast_min_slab = 0.0012 * 1000 * slab_thick
             Ast_slab = max(Ast_req_slab, Ast_min_slab)
             
-            slab_spacing = min(math.floor(1000 / (Ast_slab / 78.5) / 10)*10, 300) # Using T10 bars
+            slab_spacing = min(math.floor(1000 / (Ast_slab / 78.5) / 10)*10, 300) 
             d_req_flex = math.sqrt((Mu_slab * 1e6) / ((0.133 if fy>=500 else 0.138) * max(fck, 1.0) * 1000))
             d_req_def = (Lx * 1000) / 28.0 
             
@@ -532,75 +520,101 @@ if st.button("🚀 Execute Analysis & Extract Design Detailing", type="primary",
             else: 
                 st.error("❌ Slab Thickness Fails Deflection/Flexure limits. Increase Thickness.")
             
-            # FOOTING DESIGN (UPGRADED WITH PUNCHING SHEAR)
-            st.markdown("### Isolated Pad Footings (Flexure & Punching Shear Check)")
-            st.info(f"Sizes based on SBC = {sbc} kN/m². Depths optimized for Two-Way Punching Shear (IS 456).")
-            
+            st.divider()
+
+            # --- ISOLATED FOOTING SIZING & GEOMETRIC COLLECTION ---
+            footing_geoms = {}
             footing_results = []
+            
             for nid, data in base_reactions.items():
-                # 1. Size the Pad Area (Serviceability)
                 P_service = data['Pu'] / 1.5
                 Area_req = (P_service * 1.1) / max(sbc, 1.0)
                 Side_L = max(math.ceil(math.sqrt(Area_req) * 10) / 10.0, 1.0)
                 
-                # Column dimensions (m)
-                col_b, col_h = map(lambda x: float(x)/1000.0, data['Col_Size'].split('x'))
+                footing_geoms[nid] = {
+                    'x': data['x'], 'y': data['y'], 
+                    'L': Side_L, 'Pu': data['Pu']
+                }
                 
-                net_upward_p = data['Pu'] / (Side_L**2) # kN/m²
-                
-                # 2. Initial Depth based on Flexure
-                proj_x = max((Side_L - max(col_b, col_h)) / 2.0, 0.01)
+                net_upward_p = data['Pu'] / (Side_L**2)
+                col_c = max(map(float, data['Col_Size'].split('x'))) / 1000.0
+                proj_x = max((Side_L - col_c) / 2.0, 0.01)
                 Mu_footing = net_upward_p * Side_L * (proj_x**2) / 2.0
-                d_req_flex = math.sqrt((Mu_footing * 1e6) / ((0.133 if fy>=500 else 0.138) * max(fck, 1.0) * (Side_L*1000)))
                 
-                # 3. ITERATIVE PUNCHING SHEAR CHECK (Two-Way Shear at d/2)
-                D_prov = max(300, math.ceil((d_req_flex + 50) / 50.0) * 50)
-                d_eff = D_prov - 50 # effective depth in mm
+                d_req_footing = math.sqrt((Mu_footing * 1e6) / ((0.133 if fy>=500 else 0.138) * max(fck, 1.0) * (Side_L*1000)))
+                D_prov = max(300, math.ceil((d_req_footing + 50) / 50.0) * 50)
+                d_eff_footing = max(D_prov - 50, 1.0)
                 
-                while True:
-                    d_m = d_eff / 1000.0 # d in meters
-                    
-                    # Critical perimeter b0 at d/2 from column face
-                    c_x = col_b + d_m
-                    c_y = col_h + d_m
-                    b0 = 2 * (c_x + c_y) # meters
-                    
-                    # Punching Area
-                    A_punching = c_x * c_y
-                    
-                    # Punching Force (Total load minus upward soil pressure directly under column)
-                    V_punch = data['Pu'] - (net_upward_p * A_punching)
-                    
-                    # Punching Shear Stress (MPa)
-                    tau_v = (V_punch * 1000) / (b0 * 1000 * d_eff) if b0 > 0 else 0
-                    
-                    # Permissible Punching Shear (IS 456: ks * 0.25 * sqrt(fck))
-                    ks = min(0.5 + (min(col_b, col_h) / max(col_b, col_h)), 1.0)
-                    tau_c = ks * 0.25 * math.sqrt(fck)
-                    
-                    if tau_v <= tau_c:
-                        break # Safe! Exit loop.
-                    else:
-                        # Fails punching shear. Increase depth by 50mm and recalculate.
-                        D_prov += 50
-                        d_eff = D_prov - 50
-                
-                # 4. Final Steel Calculation using the Safe Depth
-                sqrt_ftg = max(1 - (4.6 * Mu_footing * 1e6) / (max(fck, 1.0) * (Side_L*1000) * d_eff**2), 0)
-                Ast_req_ftg = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(sqrt_ftg)) * (Side_L*1000) * d_eff
+                sqrt_ftg = max(1 - (4.6 * Mu_footing * 1e6) / (max(fck, 1.0) * (Side_L*1000) * d_eff_footing**2), 0)
+                Ast_req_ftg = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(sqrt_ftg)) * (Side_L*1000) * d_eff_footing
                 Ast_min_ftg = 0.0012 * (Side_L*1000) * D_prov
                 Ast_ftg = max(Ast_req_ftg, Ast_min_ftg)
                 
                 ast_per_meter = Ast_ftg / Side_L
-                ftg_spacing = min(math.floor(1000 / (ast_per_meter / 113.1) / 10)*10, 300) # Using T12 bars
+                ftg_spacing = min(math.floor(1000 / (ast_per_meter / 113.1) / 10)*10, 300)
                 
                 footing_results.append({
                     "Node ID": f"N{nid}",
                     "Factored Pu (kN)": round(data['Pu'], 1),
                     "Footing Size (m)": f"{Side_L} x {Side_L}",
                     "Pad Depth (mm)": int(D_prov),
-                    "Gov. By": "Punching Shear" if D_prov > max(300, math.ceil((d_req_flex + 50) / 50.0) * 50) else "Flexure",
                     "Base Mesh (B/W)": f"T12 @ {int(ftg_spacing)} c/c"
                 })
-                
+
+            st.markdown("### 1. Isolated Pad Footings (Based on SBC)")
+            st.info(f"Using Unfactored Service Loads (Pu / 1.5) + 10% Self-Weight against SBC = {sbc} kN/m²")
             st.dataframe(pd.DataFrame(footing_results), width="stretch")
+
+            st.divider()
+
+            # --- NEW: CLASH DETECTION & COMBINED FOOTING ENGINE ---
+            st.markdown("### 2. 🕵️ Foundation Plan Validation (Clash Detection)")
+            clashes = []
+            processed_nodes = set()
+            combined_footing_results = []
+            
+            node_ids = list(footing_geoms.keys())
+            for i in range(len(node_ids)):
+                for j in range(i+1, len(node_ids)):
+                    n1, n2 = node_ids[i], node_ids[j]
+                    if n1 in processed_nodes or n2 in processed_nodes:
+                        continue
+                    
+                    f1, f2 = footing_geoms[n1], footing_geoms[n2]
+                    dist = math.hypot(f1['x'] - f2['x'], f1['y'] - f2['y'])
+                    req_dist = (f1['L'] / 2.0) + (f2['L'] / 2.0)
+                    
+                    if dist < req_dist:
+                        clashes.append((n1, n2))
+                        processed_nodes.add(n1)
+                        processed_nodes.add(n2)
+                        
+                        # CG Balancing & Rectangular Combine Logic
+                        P1, P2 = f1['Pu'], f2['Pu']
+                        P_tot_service = (P1 + P2) / 1.5
+                        Area_req = (P_tot_service * 1.1) / max(sbc, 1.0)
+                        
+                        CG_dist = (P2 * dist) / max(P1 + P2, 1.0)
+                        
+                        # Minimum edge clearance assumed 0.5m past column centerline
+                        half_L = max(CG_dist, dist - CG_dist) + 0.5
+                        L_comb = max(math.ceil((2 * half_L) * 10) / 10.0, 1.0)
+                        B_comb = max(math.ceil((Area_req / L_comb) * 10) / 10.0, 1.0)
+                        
+                        status = "Combined Rectangular"
+                        if B_comb > L_comb * 1.5:
+                            status = "Requires Raft/Mat"
+                            
+                        combined_footing_results.append({
+                            "Clashing Nodes": f"N{n1} & N{n2}",
+                            "Dist Between Cols (m)": round(dist, 2),
+                            "Total Service Load (kN)": round(P_tot_service, 1),
+                            "Combined L x B (m)": f"{L_comb} x {B_comb}",
+                            "Design Recommendation": status
+                        })
+
+            if not clashes:
+                st.success("✅ Foundation Validation Passed: All isolated footings have adequate spatial clearance. No overlapping soil pressure bulbs detected.")
+            else:
+                st.error(f"🚨 Validation Failed: {len(clashes)} footing clash(es) detected. Overlapping soil pressure zones will cause severe differential settlement. Implementing Combined Footing solutions.")
+                st.dataframe(pd.DataFrame(combined_footing_results), width="stretch")
