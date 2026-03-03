@@ -8,7 +8,7 @@ import copy
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Practical 3D Frame Analyzer & Designer", layout="wide")
 st.title("🏗️ 3D Frame Analysis & Complete Building Design")
-st.caption("Includes: Automated Plan Validation | Auto-Sizing | Mixed Rebar | Bar Bending Schedule (BBS)")
+st.caption("Includes: 3D Viewport | Plan Validation | Mixed Rebar | Bar Bending Schedule (BBS)")
 
 # --- INITIALIZE STATE ---
 if 'grids' not in st.session_state:
@@ -76,6 +76,8 @@ sbc = st.sidebar.number_input("Safe Bearing Capacity (kN/m²)", value=150.0, ste
 
 st.sidebar.header("5. Engine Settings")
 apply_cracked_modifiers = st.sidebar.checkbox("Use IS 1893 Cracked Sections", value=True)
+show_nodes = st.sidebar.checkbox("Show Node Numbers in 3D", value=False)
+show_members = st.sidebar.checkbox("Show Member IDs in 3D", value=False)
 
 st.sidebar.header("6. IS Code Combinations")
 combo = st.sidebar.selectbox("Select Load Combination", [
@@ -140,7 +142,6 @@ def get_rebar_detail(ast_req, member_type="Beam"):
     return "Custom"
 
 def parse_rebar_string(rebar_str):
-    """Parses '4-T16 + 2-T12 (Prv: 1030)' back into list of tuples [(4, 16), (2, 12)]"""
     if "Prv" not in str(rebar_str): return []
     clean = rebar_str.split(" (Prv")[0]
     bars = []
@@ -258,6 +259,29 @@ def build_mesh():
     return nodes, elements, diaphragm_nodes
 
 nodes, elements, diaphragm_nodes = build_mesh()
+
+# --- [RESTORED] RENDER 3D MODEL WITH ANNOTATIONS ---
+st.subheader("🖥️ 3D Architectural Viewport")
+fig = go.Figure()
+for el in elements:
+    if el['type'] == 'Diaphragm': continue
+    ni = next(n for n in nodes if n['id'] == el['ni'])
+    nj = next(n for n in nodes if n['id'] == el['nj'])
+    color = '#1f77b4' if el['type'] == 'Column' else '#d62728'
+    fig.add_trace(go.Scatter3d(x=[ni['x'], nj['x']], y=[ni['y'], nj['y']], z=[ni['z'], nj['z']], mode='lines', line=dict(color=color, width=4), hoverinfo='text', text=f"ID: {el['id']}", showlegend=False))
+    
+    if show_members:
+        fig.add_trace(go.Scatter3d(x=[(ni['x']+nj['x'])/2], y=[(ni['y']+nj['y'])/2], z=[(ni['z']+nj['z'])/2], mode='text', text=[f"M{el['id']}"], textfont=dict(color='green', size=10), showlegend=False, hoverinfo='none'))
+
+phy_nodes = [n for n in nodes if not n['is_dummy']]
+fig.add_trace(go.Scatter3d(x=[n['x'] for n in phy_nodes], y=[n['y'] for n in phy_nodes], z=[n['z'] for n in phy_nodes], mode='markers', marker=dict(size=3, color='black'), hoverinfo='none', showlegend=False))
+
+if show_nodes:
+    fig.add_trace(go.Scatter3d(x=[n['x'] for n in phy_nodes], y=[n['y'] for n in phy_nodes], z=[n['z'] for n in phy_nodes], mode='text', text=[f"N{n['id']}" for n in phy_nodes], textfont=dict(color='purple', size=10), textposition="top center", showlegend=False, hoverinfo='none'))
+
+fig.update_layout(scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'), margin=dict(l=0, r=0, b=0, t=0), height=500)
+st.plotly_chart(fig, width="stretch")
+# ---------------------------------------------------
 
 def calc_yield_line_udl(ni, nj, el_dir, q_area):
     L_beam = math.sqrt((nj['x']-ni['x'])**2 + (nj['y']-ni['y'])**2)
@@ -444,9 +468,9 @@ if st.button("🚀 Execute Validation, Design & Generate BBS", type="primary", w
             parsed_bars = parse_rebar_string(rebar_str)
             for (count, dia) in parsed_bars:
                 if el['type'] == 'Beam':
-                    cut_L = el['L'] - (2 * 0.025) + (2 * 50 * dia/1000.0) # Length - covers + anchorage
+                    cut_L = el['L'] - (2 * 0.025) + (2 * 50 * dia/1000.0)
                 else:
-                    cut_L = el['L'] + (50 * dia/1000.0) # Column height + lap
+                    cut_L = el['L'] + (50 * dia/1000.0) 
                 
                 wt = (dia**2 / 162.0) * cut_L * count
                 bbs_records.append({
@@ -500,7 +524,7 @@ if st.button("🚀 Execute Validation, Design & Generate BBS", type="primary", w
                 st.dataframe(beam_group, width="stretch")
                 
         with tab3:
-            # --- SLAB & FOOTING CALCULATION ---
+            # --- SLAB CHECK ---
             x_spans = [x_coords_sorted[i+1] - x_coords_sorted[i] for i in range(len(x_coords_sorted)-1) if (x_coords_sorted[i+1] - x_coords_sorted[i]) > 0.1]
             y_spans = [y_coords_sorted[i+1] - y_coords_sorted[i] for i in range(len(y_coords_sorted)-1) if (y_coords_sorted[i+1] - y_coords_sorted[i]) > 0.1]
             Lx = max(min(x_spans) if x_spans else 1.0, 0.001)
@@ -536,6 +560,7 @@ if st.button("🚀 Execute Validation, Design & Generate BBS", type="primary", w
             
             st.divider()
             
+            # --- FOUNDATION & PUNCHING SHEAR ---
             st.markdown("### Foundation Validation & Footing Design")
             footing_geoms, footing_results = {}, []
             for nid, data in base_reactions.items():
@@ -576,7 +601,7 @@ if st.button("🚀 Execute Validation, Design & Generate BBS", type="primary", w
                 # --- BBS: Footing Addition ---
                 num_ftg_bars = int((Side_L - 0.1) / (ftg_spacing/1000.0)) + 1
                 ftg_cut_len = (Side_L - 0.1) + 2*(D_prov/1000.0 - 0.1)
-                wt_ftg = (12**2 / 162.0) * ftg_cut_len * (num_ftg_bars * 2) # Both ways
+                wt_ftg = (12**2 / 162.0) * ftg_cut_len * (num_ftg_bars * 2) 
                 bbs_records.append({"Element": f"Footing N{nid}", "Location": "Foundation", "Bar Type": "Base Mesh (Both Ways)", "Dia (mm)": 12, "No. Bars": num_ftg_bars*2, "Cut Length (m)": round(ftg_cut_len,2), "Total Wt (kg)": round(wt_ftg,2)})
                 
             clashes, processed = [], set()
