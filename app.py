@@ -498,32 +498,74 @@ if st.button("🚀 Execute Analysis, Code Checks & Generate BBS", type="primary"
             st.dataframe(df_design, width="stretch")
                 
         with tab3:
-            # --- SLAB CHECK & BBS ---
+            # --- RESTRAINED SLAB CHECK (Negative Moments & Torsion) ---
             x_spans = [x_coords_sorted[i+1] - x_coords_sorted[i] for i in range(len(x_coords_sorted)-1) if (x_coords_sorted[i+1] - x_coords_sorted[i]) > 0.1]
             y_spans = [y_coords_sorted[i+1] - y_coords_sorted[i] for i in range(len(y_coords_sorted)-1) if (y_coords_sorted[i+1] - y_coords_sorted[i]) > 0.1]
             Lx, Ly = max(min(x_spans) if x_spans else 1.0, 0.001), max(max(y_spans) if y_spans else 1.0, 0.001)
             ratio = Ly / Lx
-            alpha_x = np.interp(ratio, [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0], [0.062, 0.074, 0.084, 0.093, 0.099, 0.104, 0.113, 0.118]) if ratio <= 2.0 else 0.125
+            
+            # Restrained Slab Coefficients (Approximation of IS 456 Table 26 for interior panels)
+            alpha_pos = np.interp(ratio, [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0], [0.032, 0.037, 0.043, 0.047, 0.051, 0.053, 0.060, 0.065]) if ratio <= 2.0 else 0.125
+            alpha_neg = np.interp(ratio, [1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.75, 2.0], [0.043, 0.048, 0.057, 0.064, 0.068, 0.072, 0.080, 0.087]) if ratio <= 2.0 else 0.125
             
             w_u_slab = 1.5 * (live_load + floor_finish + (slab_thick/1000.0)*25.0)
-            Mu_slab = alpha_x * w_u_slab * (Lx**2)
-            d_eff_slab = max(slab_thick - 25, 1.0)
-            Ast_req_slab = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(max(1 - (4.6 * Mu_slab * 1e6) / (max(fck, 1.0) * 1000 * d_eff_slab**2), 0))) * 1000 * d_eff_slab
-            slab_spacing = min(math.floor(1000 / (max(Ast_req_slab, 0.0012 * 1000 * slab_thick) / 78.5) / 10)*10, 300) 
             
-            d_req_flex, d_req_def = math.sqrt((Mu_slab * 1e6) / ((0.133 if fy>=500 else 0.138) * max(fck, 1.0) * 1000)), (Lx * 1000) / 28.0 
+            # Moments
+            Mu_pos = alpha_pos * w_u_slab * (Lx**2)
+            Mu_neg = alpha_neg * w_u_slab * (Lx**2)
+            d_eff_slab = max(slab_thick - 25, 1.0)
+            
+            # Positive Steel (Bottom)
+            sqrt_pos = max(1 - (4.6 * Mu_pos * 1e6) / (max(fck, 1.0) * 1000 * d_eff_slab**2), 0)
+            Ast_req_pos = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(sqrt_pos)) * 1000 * d_eff_slab
+            Ast_pos = max(Ast_req_pos, 0.0012 * 1000 * slab_thick)
+            spc_pos = min(math.floor(1000 / (Ast_pos / 78.5) / 10)*10, 300) # T10
+            
+            # Negative Steel (Top Extra over Supports)
+            sqrt_neg = max(1 - (4.6 * Mu_neg * 1e6) / (max(fck, 1.0) * 1000 * d_eff_slab**2), 0)
+            Ast_req_neg = (0.5 * fck / max(fy, 1.0)) * (1 - math.sqrt(sqrt_neg)) * 1000 * d_eff_slab
+            Ast_neg = max(Ast_req_neg, 0.0012 * 1000 * slab_thick)
+            spc_neg = min(math.floor(1000 / (Ast_neg / 78.5) / 10)*10, 300) # T10
+            
+            # Torsion Steel at Discontinuous Corners (IS 456 D-1.8: 3/4 of max pos Ast)
+            Ast_tor = 0.75 * Ast_pos
+            spc_tor = min(math.floor(1000 / (Ast_tor / 78.5) / 10)*10, 300) # T10
+            tor_grid_len = Lx / 5.0
+            
+            # Depth Check (Governed by Max Negative Moment)
+            d_req_flex = math.sqrt((max(Mu_pos, Mu_neg) * 1e6) / ((0.133 if fy>=500 else 0.138) * max(fck, 1.0) * 1000))
+            d_req_def = (Lx * 1000) / 28.0 # Cont. Slab deflection ratio
             safe_slab = slab_thick >= max(d_req_flex, d_req_def) + 25
             
+            # --- BBS: Monolithic Slab Addition ---
             for flr in range(1, len(floors_df)+1):
-                n_main, l_main = int(Ly / (slab_spacing/1000.0)) + 1, Lx + (2 * 50 * 10/1000.0)
+                # Bottom Main & Dist
+                n_main, l_main = int(Ly / (spc_pos/1000.0)) + 1, Lx + (2 * 50 * 10/1000.0)
                 n_dist, l_dist = int(Lx / 0.20) + 1, Ly + (2 * 50 * 10/1000.0)
-                bbs_records.append({"Element": "Floor Slab", "Location": f"Floor {flr}", "Bar Type": "Main (T10)", "Dia (mm)": 10, "No. Bars": n_main, "Cut Length (m)": round(l_main,2), "Total Wt (kg)": round((10**2/162.0)*l_main*n_main,2)})
-                bbs_records.append({"Element": "Floor Slab", "Location": f"Floor {flr}", "Bar Type": "Dist (T10 @ 200c/c)", "Dia (mm)": 10, "No. Bars": n_dist, "Cut Length (m)": round(l_dist,2), "Total Wt (kg)": round((10**2/162.0)*l_dist*n_dist,2)})
+                bbs_records.append({"Element": "Slab", "Location": f"Flr {flr}", "Bar Type": "Bot Main (T10)", "Dia (mm)": 10, "No. Bars": n_main, "Cut Length (m)": round(l_main,2), "Total Wt (kg)": round((10**2/162.0)*l_main*n_main,2)})
+                bbs_records.append({"Element": "Slab", "Location": f"Flr {flr}", "Bar Type": "Bot Dist (T10@200)", "Dia (mm)": 10, "No. Bars": n_dist, "Cut Length (m)": round(l_dist,2), "Total Wt (kg)": round((10**2/162.0)*l_dist*n_dist,2)})
+                
+                # Top Extra (Negative Moment) over supports
+                # Cut length approx 0.3Lx on both sides of beam = 0.6Lx
+                l_top = 0.6 * Lx
+                n_top = int(Ly / (spc_neg/1000.0)) + 1
+                bbs_records.append({"Element": "Slab", "Location": f"Flr {flr}", "Bar Type": "Top Extra Support (T10)", "Dia (mm)": 10, "No. Bars": n_top*2, "Cut Length (m)": round(l_top,2), "Total Wt (kg)": round((10**2/162.0)*l_top*(n_top*2),2)})
+                
+                # Corner Torsion Mesh (4 Outer Corners)
+                n_tor = int(tor_grid_len / (spc_tor/1000.0)) * 2 # Both ways
+                bbs_records.append({"Element": "Slab", "Location": f"Flr {flr} Corners", "Bar Type": "Torsion Mesh (T10)", "Dia (mm)": 10, "No. Bars": n_tor*4, "Cut Length (m)": round(tor_grid_len,2), "Total Wt (kg)": round((10**2/162.0)*tor_grid_len*(n_tor*4),2)})
 
-            st.markdown("### IS 456 Two-Way Slab Check")
-            st.write(f"- **Critical Panel:** {round(Lx,2)}m x {round(Ly,2)}m | **Max Moment:** {round(Mu_slab, 2)} kN.m")
-            if safe_slab: st.success(f"✅ Slab Safe. **Main Reinforcement (Bottom): T10 @ {int(slab_spacing)} mm c/c**")
-            else: st.error("❌ Slab Fails. Increase Thickness.")
+            st.markdown("### IS 456 Restrained Two-Way Slab Check")
+            st.write(f"- **Critical Panel:** {round(Lx,2)}m x {round(Ly,2)}m | **Max Hogging Moment:** {round(Mu_neg, 2)} kN.m")
+            st.write(f"- **Required Thickness:** {round(max(d_req_flex, d_req_def)+25, 1)} mm | **Provided:** {slab_thick} mm")
+            
+            if safe_slab: 
+                st.success(f"""✅ Slab Safe. 
+                \n- **Bot Span Mesh:** T10 @ {int(spc_pos)} c/c
+                \n- **Top Support (Hogging):** T10 @ {int(spc_neg)} c/c
+                \n- **Corner Torsion Mesh:** T10 @ {int(spc_tor)} c/c (over {round(tor_grid_len, 2)}m length)""")
+            else: 
+                st.error("❌ Slab Fails. Increase Thickness.")
             st.divider()
             
             # --- FOUNDATION VALIDATION, PUNCHING SHEAR & BBS ---
