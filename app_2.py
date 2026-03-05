@@ -13,7 +13,7 @@ from ezdxf.enums import TextEntityAlignment
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Practical 3D Frame Analyzer & Designer", layout="wide")
 st.title("🏗️ 3D Frame Analysis & Complete Building Design")
-st.caption("Audited: 3D Viewport | PDF Export | LibreCAD DXF (With Rebar Detailing) | BBS")
+st.caption("Audited: 3D Viewport | PDF Export | LibreCAD DXF | BBS | Detailed Estimate")
 
 # --- INITIALIZE STATE ---
 if 'grids' not in st.session_state:
@@ -83,6 +83,17 @@ f_dl, f_ll, f_eq = 1.5, 1.5, 0.0
 if "1.2" in combo: f_dl, f_ll, f_eq = 1.2, 1.2, 1.2
 elif "0.9" in combo: f_dl, f_ll, f_eq = 0.9, 0.0, 1.5
 elif "1.5 EQ" in combo: f_dl, f_ll, f_eq = 1.5, 0.0, 1.5
+
+# --- NEW: ESTIMATION RATES ---
+st.sidebar.header("7. BOQ & Estimate Rates (₹)")
+with st.sidebar.expander("Modify Rates (Mat. + Lab.)", expanded=False):
+    rate_conc_mat = st.number_input("Concrete Material (₹/m³)", value=5500)
+    rate_conc_lab = st.number_input("Concrete Labor (₹/m³)", value=1200)
+    rate_steel_mat = st.number_input("Steel Material (₹/kg)", value=65)
+    rate_steel_lab = st.number_input("Steel Labor (₹/kg)", value=15)
+    rate_form_mat = st.number_input("Formwork Material (₹/m²)", value=350)
+    rate_form_lab = st.number_input("Formwork Labor (₹/m²)", value=200)
+    rate_excavation = st.number_input("Excavation (Labor) (₹/m³)", value=300)
 
 # --- GEOMETRY DATA EDITORS ---
 with st.expander("📐 Modify Building Grids & Geometry", expanded=False):
@@ -358,7 +369,7 @@ def transform_matrix(ni, nj, angle_deg):
 
 st.divider()
 
-if st.button("🚀 Execute Analysis & Generate CAD / PDF", type="primary", width="stretch"):
+if st.button("🚀 Execute Analysis, Generate CAD/PDF & Estimates", type="primary", width="stretch"):
     with st.spinner("Solving Matrix, Running Code Checks & Building CAD Files..."):
         ndof = len(nodes) * 6
         K_global = np.zeros((ndof, ndof))
@@ -523,6 +534,61 @@ if st.button("🚀 Execute Analysis & Generate CAD / PDF", type="primary", width
                 dist = math.hypot(f1['x'] - f2['x'], f1['y'] - f2['y'])
                 if dist < (f1['L'] / 2.0) + (f2['L'] / 2.0):
                     clashes.append((n1, n2)); processed.add(n1); processed.add(n2)
+                    
+        df_bbs = pd.DataFrame(bbs_records)
+
+        # --- 💰 ESTIMATION TAKEOFF ENGINE ---
+        est_records = []
+        for el in elements:
+            if el['type'] == 'Diaphragm': continue
+            flr = el['ni_n']['floor']
+            b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
+            vol = b_m * h_m * el['L']
+            form = 2 * (b_m + h_m) * el['L'] if el['type'] == 'Column' else (b_m + 2 * h_m) * el['L']
+            est_records.append({"Floor": f"Floor {flr}", "Category": "Concrete", "Qty": vol, "Unit": "m³"})
+            est_records.append({"Floor": f"Floor {flr}", "Category": "Formwork", "Qty": form, "Unit": "m²"})
+            
+        tot_area = max((max(x_coords_sorted) - min(x_coords_sorted)), 1.0) * max((max(y_coords_sorted) - min(y_coords_sorted)), 1.0) if x_coords_sorted and y_coords_sorted else 0
+        for flr in range(1, len(floors_df)+1):
+            est_records.append({"Floor": f"Floor {flr}", "Category": "Concrete", "Qty": tot_area * (slab_thick/1000.0), "Unit": "m³"})
+            est_records.append({"Floor": f"Floor {flr}", "Category": "Formwork", "Qty": tot_area, "Unit": "m²"})
+            
+        for f in footing_results:
+            L_f = float(f['Size'].split('x')[0])
+            D_f = f['D(mm)'] / 1000.0
+            est_records.append({"Floor": "Foundation", "Category": "Concrete", "Qty": L_f * L_f * D_f, "Unit": "m³"})
+            est_records.append({"Floor": "Foundation", "Category": "Formwork", "Qty": 4 * L_f * D_f, "Unit": "m²"})
+            est_records.append({"Floor": "Foundation", "Category": "Excavation", "Qty": (L_f + 1.0)**2 * 1.5, "Unit": "m³"})
+            
+        # Helper to trace element ID back to floor
+        id_to_floor = {row['ID']: f"Floor {row['Flr']}" for row in analysis_data}
+        
+        def clean_loc(element_str):
+            estr = str(element_str)
+            if "Foot" in estr or "Foundation" in estr: return "Foundation"
+            if "Slab F" in estr: 
+                try: return f"Floor {estr.split('Slab F')[1].split()[0]}"
+                except: pass
+            if "M" in estr:
+                m_id = estr.split(" ")[0]
+                return id_to_floor.get(m_id, "Floor 1")
+            return "Other"
+            
+        for index, row in df_bbs.iterrows():
+            est_records.append({"Floor": clean_loc(row['Element']), "Category": "Steel", "Qty": row['Wt(kg)'], "Unit": "kg"})
+            
+        df_est = pd.DataFrame(est_records)
+        df_detailed = df_est.groupby(['Floor', 'Category', 'Unit'])['Qty'].sum().reset_index()
+        
+        rates_mat = {"Concrete": rate_conc_mat, "Steel": rate_steel_mat, "Formwork": rate_form_mat, "Excavation": 0}
+        rates_lab = {"Concrete": rate_conc_lab, "Steel": rate_steel_lab, "Formwork": rate_form_lab, "Excavation": rate_excavation}
+        
+        df_detailed['Mat. Rate (₹)'] = df_detailed['Category'].map(rates_mat)
+        df_detailed['Lab. Rate (₹)'] = df_detailed['Category'].map(rates_lab)
+        df_detailed['Material Cost (₹)'] = np.round(df_detailed['Qty'] * df_detailed['Mat. Rate (₹)'], 2)
+        df_detailed['Labor Cost (₹)'] = np.round(df_detailed['Qty'] * df_detailed['Lab. Rate (₹)'], 2)
+        df_detailed['Total Cost (₹)'] = df_detailed['Material Cost (₹)'] + df_detailed['Labor Cost (₹)']
+        df_detailed['Qty'] = np.round(df_detailed['Qty'], 2)
 
         # --- GENERATE PDF REPORT ---
         pdf = PDFReport()
@@ -535,7 +601,6 @@ if st.button("🚀 Execute Analysis & Generate CAD / PDF", type="primary", width
         slab_data = [{"Panel": f"{round(Lx,2)}m x {round(Ly,2)}m", "Thickness": f"{slab_thick} mm", "Bot Span Mesh": f"T10 @ {int(spc_pos)} c/c", "Top Hogging": f"T10 @ {int(spc_neg)} c/c", "Corner Torsion": f"T10 @ {int(spc_tor)} c/c"}]
         pdf.build_table(pd.DataFrame(slab_data))
         pdf.chapter_title("4. BAR BENDING SCHEDULE (BBS)")
-        df_bbs = pd.DataFrame(bbs_records)
         pdf.build_table(df_bbs)
         pdf.set_font('Arial', 'B', 12)
         total_wt_kg = df_bbs["Wt(kg)"].sum()
@@ -739,12 +804,12 @@ if st.button("🚀 Execute Analysis & Generate CAD / PDF", type="primary", width
         os.remove(path)
 
         # --- UI DISPLAY ---
-        st.success("✅ Analysis, PDF Reporting & CAD Drafting Complete!")
+        st.success("✅ Analysis, PDF Reporting, CAD Drafting & Estimation Complete!")
         col_dl1, col_dl2 = st.columns(2)
         with col_dl1: st.download_button(label="📄 Download Production PDF Report", data=pdf_bytes, file_name="Structural_Detailing_Report.pdf", mime="application/pdf", type="primary", width="stretch")
         with col_dl2: st.download_button(label="📥 Download CAD Plan & Details (.dxf)", data=dxf_bytes, file_name="Floor_Framing_Plans.dxf", mime="application/dxf", type="primary", width="stretch")
             
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Raw Forces", "📐 Main Detailing", "🟦 Slabs & Footings", "🧾 Bar Bending Schedule"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Raw Forces", "📐 Main Detailing", "🟦 Slabs & Footings", "🧾 Bar Bending Schedule", "💰 BOQ & Estimate"])
         
         with tab1:
             st.markdown("### Individual Member Internal Forces")
@@ -772,3 +837,12 @@ if st.button("🚀 Execute Analysis & Generate CAD / PDF", type="primary", width
             st.dataframe(df_bbs, width="stretch")
             st.metric(label="Total Steel Tonnage Required", value=f"{total_wt_kg / 1000.0:.2f} Metric Tons")
             st.download_button(label="⬇️ Download BBS (CSV)", data=df_bbs.to_csv(index=False), file_name="building_bbs.csv", mime="text/csv", width="stretch")
+            
+        with tab5:
+            st.markdown("### 📝 Detailed Floor-wise Bill of Quantities (BOQ)")
+            st.dataframe(df_detailed, width="stretch")
+            st.subheader("Abstract Estimate (Cost Summary)")
+            df_abstract = df_detailed.groupby('Floor')[['Material Cost (₹)', 'Labor Cost (₹)', 'Total Cost (₹)']].sum().reset_index()
+            st.dataframe(df_abstract, width="stretch")
+            st.metric(label="Grand Total Construction Cost (Estimate)", value=f"₹ {df_abstract['Total Cost (₹)'].sum():,.2f}")
+            st.download_button(label="⬇️ Download Detailed Estimate (CSV)", data=df_detailed.to_csv(index=False), file_name="Detailed_Estimate.csv", mime="text/csv", width="stretch")
