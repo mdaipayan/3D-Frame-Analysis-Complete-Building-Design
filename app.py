@@ -11,9 +11,9 @@ import ezdxf
 from ezdxf.enums import TextEntityAlignment
 
 # --- PAGE SETUP ---
-st.set_page_config(page_title="Practical 3D Frame Analyzer & Designer", layout="wide")
+st.set_page_config(page_title="Production 3D Frame Analyzer & Detailer", layout="wide")
 st.title("🏗️ 3D Frame Analysis & Complete Building Design")
-st.caption("Audited: 3D Viewport | PDF Export | LibreCAD DXF | BBS | Detailed Estimate")
+st.caption("Audited: 3D Viewport | PDF | DXF | BBS | Estimate | Bar Spacing Checks")
 
 # --- INITIALIZE STATE ---
 if 'grids' not in st.session_state:
@@ -84,7 +84,6 @@ if "1.2" in combo: f_dl, f_ll, f_eq = 1.2, 1.2, 1.2
 elif "0.9" in combo: f_dl, f_ll, f_eq = 0.9, 0.0, 1.5
 elif "1.5 EQ" in combo: f_dl, f_ll, f_eq = 1.5, 0.0, 1.5
 
-# --- NEW: ESTIMATION RATES ---
 st.sidebar.header("7. BOQ & Estimate Rates (₹)")
 with st.sidebar.expander("Modify Rates (Mat. + Lab.)", expanded=False):
     rate_conc_mat = st.number_input("Concrete Material (₹/m³)", value=5500)
@@ -145,34 +144,46 @@ class PDFReport(FPDF):
             self.ln()
         self.ln(5)
 
-# --- REBAR DETAILING ENGINE ---
-def get_rebar_detail(ast_req, member_type="Beam"):
+# --- REBAR DETAILING ENGINE WITH CONGESTION CHECK ---
+def get_rebar_detail(ast_req, member_type="Beam", b_mm=230):
     areas = {10: 78.5, 12: 113.1, 16: 201.0, 20: 314.1, 25: 490.8, 32: 804.2}
     dias = [10, 12, 16, 20, 25, 32]
     configs = []
+    
+    cover = 25 if member_type == "Beam" else 40
+    stirrup_d = 8
+    # IS 456 min spacing between parallel bars: max of (dia, 25mm) assuming 20mm max aggregate
+    def check_fit(n_bars, max_d):
+        min_gap = max(max_d, 25)
+        req_width = (2 * cover) + (2 * stirrup_d) + (n_bars * max_d) + ((n_bars - 1) * min_gap)
+        return req_width <= b_mm
+
     if member_type == "Beam":
         for d in [12, 16, 20, 25, 32]:
-            for n in [2, 3, 4, 5, 6]: configs.append((n, d, 0, 0, n*areas[d]))
+            for n in [2, 3, 4, 5, 6]: 
+                if check_fit(n, d): configs.append((n, d, 0, 0, n*areas[d]))
         for i in range(1, len(dias)):
             for n_main in [2, 3, 4]:
                 for n_sec in [1, 2, 3]:
-                    if n_main + n_sec <= 6:
+                    if n_main + n_sec <= 6 and check_fit(n_main + n_sec, max(dias[i], dias[i-1])):
                         configs.append((n_main, dias[i], n_sec, dias[i-1], n_main*areas[dias[i]] + n_sec*areas[dias[i-1]]))
     else: 
+        # Columns distribute bars around perimeter, spacing check is different
         for d in [12, 16, 20, 25, 32]:
             for n in [4, 6, 8, 10, 12, 16]: configs.append((n, d, 0, 0, n*areas[d]))
         for i in range(1, len(dias)):
             for n_face in [2, 4, 6, 8]:
                 configs.append((4, dias[i], n_face, dias[i-1], 4*areas[dias[i]] + n_face*areas[dias[i-1]]))
+                
     configs.sort(key=lambda x: x[4])
     for c in configs:
         if c[4] >= ast_req:
             if c[2] == 0: return f"{c[0]}-T{c[1]} (Prv: {int(c[4])})"
             else: return f"{c[0]}-T{c[1]} + {c[2]}-T{c[3]} (Prv: {int(c[4])})"
-    return "Custom"
+    return "Custom (Resize Section)"
 
 def parse_rebar_string(rebar_str):
-    if "Prv" not in str(rebar_str): return []
+    if "Prv" not in str(rebar_str) or "Resize" in str(rebar_str): return []
     bars = []
     for part in rebar_str.split(" (Prv")[0].split(" + "):
         if "-T" in part:
@@ -449,7 +460,7 @@ if st.button("🚀 Execute Analysis, Generate CAD/PDF & Estimates", type="primar
             b_m, h_m = map(lambda x: float(x)/1000.0, el['size'].split('x'))
             if el['type'] == 'Beam':
                 req_ast_bot, req_ast_top, sv_mm, stat = design_beam_is456(b_m, h_m, Mu_pos_max, Mu_neg_max, shear, torsion_max, fck, fy)
-                rebar_bot, rebar_top = get_rebar_detail(req_ast_bot, "Beam"), get_rebar_detail(req_ast_top, "Beam")
+                rebar_bot, rebar_top = get_rebar_detail(req_ast_bot, "Beam", b_m*1000), get_rebar_detail(req_ast_top, "Beam", b_m*1000)
                 design_data.append({"ID": f"M{el['id']}", "Type": "Beam", "Flr": el['ni_n']['floor'], "Size": el['size'], "Bot Rebar": rebar_bot, "Top Rebar": rebar_top, "Ties": f"T8@{sv_mm}"})
                 
                 for (count, dia) in parse_rebar_string(rebar_bot):
@@ -465,7 +476,7 @@ if st.button("🚀 Execute Analysis, Generate CAD/PDF & Estimates", type="primar
 
             else:
                 req_ast, sv_mm, stat = design_column_is456(b_m, h_m, axial, max(Mu_neg_max, Mu_pos_max), shear, torsion_max, fck, fy)
-                rebar_str = get_rebar_detail(req_ast, "Column")
+                rebar_str = get_rebar_detail(req_ast, "Column", b_m*1000)
                 design_data.append({"ID": f"M{el['id']}", "Type": "Column", "Flr": el['ni_n']['floor'], "Size": el['size'], "Bot Rebar": "-", "Top Rebar": rebar_str, "Ties": f"T8@{sv_mm}"})
                 for (count, dia) in parse_rebar_string(rebar_str):
                     cut_L = el['L'] + (50 * dia/1000.0) 
@@ -560,7 +571,6 @@ if st.button("🚀 Execute Analysis, Generate CAD/PDF & Estimates", type="primar
             est_records.append({"Floor": "Foundation", "Category": "Formwork", "Qty": 4 * L_f * D_f, "Unit": "m²"})
             est_records.append({"Floor": "Foundation", "Category": "Excavation", "Qty": (L_f + 1.0)**2 * 1.5, "Unit": "m³"})
             
-        # Helper to trace element ID back to floor
         id_to_floor = {row['ID']: f"Floor {row['Flr']}" for row in analysis_data}
         
         def clean_loc(element_str):
