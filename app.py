@@ -14,13 +14,15 @@ from scipy.sparse.linalg import spsolve
 # ─────────────────────────────────────────────────────────────
 #  IS 456 / SP-34 NAMED CONSTANTS  (no more magic numbers)
 # ─────────────────────────────────────────────────────────────
-REBAR_AREAS   = {8: 50.3, 10: 78.5, 12: 113.1, 16: 201.0, 20: 314.1, 25: 490.8, 32: 804.2}  # mm²
+# AFTER (STIRRUP_DIA defined first, then used in REBAR_DIAS)
+REBAR_AREAS   = {8: 50.3, 10: 78.5, 12: 113.1, 16: 201.0, 20: 314.1, 25: 490.8, 32: 804.2}
+STIRRUP_DIA   = 8        # mm  ← moved up, must precede REBAR_DIAS
 REBAR_DIAS    = sorted(d for d in REBAR_AREAS if d > STIRRUP_DIA)  # main bars only (≥T10)
-STEEL_DENSITY = 7850.0   # kg/m³
-CONC_DENSITY  = 25.0     # kN/m³
-COVER_BEAM    = 25       # mm (IS 456 Cl 26.4)
-COVER_COL     = 40       # mm
-COVER_FOOTING = 50       # mm
+STEEL_DENSITY = 7850.0
+CONC_DENSITY  = 25.0
+COVER_BEAM    = 25
+COVER_COL     = 40
+COVER_FOOTING = 50
 STIRRUP_DIA   = 8        # mm
 MAX_STEEL_PCT = 0.04     # 4 % gross area (IS 456 Cl 26.5)
 MU_LIM_FE415  = 0.138    # limiting moment coefficient (IS 456 Annex G)
